@@ -49,5 +49,5 @@ python gui.py
     - `T`: 平移向量 (3x1)
     - `baseline`: 雙目基線長度 (m)
     - `ret`: 平均重投影誤差 (RMS)
-- `calibration_selection_report.json`: 圖片挑選詳細報告。
+- `calibration_selection_report.json`: 分析結果文字檔。
 - `selection_analysis.png`: 圖片挑選的分佈分析圖表。
