@@ -8,8 +8,9 @@
 ```bash
 pip install numpy opencv-python matplotlib scikit-learn
 ```
-或是 pip install -r requirements.txt
-
+或是 ```bash
+pip install -r requirements.txt
+```
 ## 使用說明
 
 執行主程式：
