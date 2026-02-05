@@ -14,7 +14,7 @@ from utils import video_processor, auto_picker, calibrator
 class AutoCalibrateApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Auto Calibrate System (自動標定系統) v1.1")
+        self.root.title("棋盤格自動標定")
         self.root.geometry("600x850")
         
         self.is_running = False
