@@ -40,5 +40,5 @@ python gui.py
 ## 輸出檔案
 
 - `calibration_result.npz`: 包含標定結果 (camera_matrix, dist_coeffs, rvecs, tvecs 等)。
-- `calibration_result.txt`: 文字版報告。
+- `calibration_result.txt`: 標定結果文字檔。
 - `selection_analysis.png`: 圖片挑選的分佈分析圖表。
