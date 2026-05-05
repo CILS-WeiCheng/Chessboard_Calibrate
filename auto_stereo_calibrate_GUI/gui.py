@@ -24,25 +24,49 @@ class AutoStereoCalibrateApp:
         self.entry_font = ('Arial', 10)
         
         # Modes
-        self.MODE_FULL = "從影片開始 (完整流程)"
-        # self.MOOE_SKIP_VIDEO = "從原始圖片 (origin_image) 開始" # 可擴充
+        self.MODE_FULL = "FULL"
+        self.MODE_DIRECT = "DIRECT"
+        self.mode_var = tk.StringVar(value=self.MODE_FULL)
         
         self.create_widgets()
         
     def create_widgets(self):
-        # 1. Input Videos Section
-        frame_videos = tk.LabelFrame(self.root, text="1. 輸入影片 (Left / Right)", font=self.label_font, padx=10, pady=10)
-        frame_videos.pack(fill="x", padx=10, pady=5)
+        # 0. Mode Selection
+        frame_mode = tk.LabelFrame(self.root, text="工作模式", font=self.label_font, padx=10, pady=5)
+        frame_mode.pack(fill="x", padx=10, pady=5)
         
-        tk.Label(frame_videos, text="左視角影片:", font=self.label_font).grid(row=0, column=0, sticky="w")
-        self.entry_video_L = tk.Entry(frame_videos, width=50, font=self.entry_font)
-        self.entry_video_L.grid(row=0, column=1, padx=5)
-        tk.Button(frame_videos, text="瀏覽", command=lambda: self.browse_file(self.entry_video_L, "Video"), font=self.label_font).grid(row=0, column=2)
+        tk.Radiobutton(frame_mode, text="完整流程 (從影片開始)", variable=self.mode_var, 
+                       value=self.MODE_FULL, command=self.toggle_mode, font=self.label_font).pack(side="left", padx=10)
+        tk.Radiobutton(frame_mode, text="快速標定 (直接輸入圖片資料夾)", variable=self.mode_var, 
+                       value=self.MODE_DIRECT, command=self.toggle_mode, font=self.label_font).pack(side="left", padx=10)
 
-        tk.Label(frame_videos, text="右視角影片:", font=self.label_font).grid(row=1, column=0, sticky="w")
-        self.entry_video_R = tk.Entry(frame_videos, width=50, font=self.entry_font)
+        # 1a. Input Videos Section (For Full Mode)
+        self.frame_videos = tk.LabelFrame(self.root, text="1. 輸入影片 (Left / Right)", font=self.label_font, padx=10, pady=10)
+        self.frame_videos.pack(fill="x", padx=10, pady=5)
+        
+        tk.Label(self.frame_videos, text="左視角影片:", font=self.label_font).grid(row=0, column=0, sticky="w")
+        self.entry_video_L = tk.Entry(self.frame_videos, width=50, font=self.entry_font)
+        self.entry_video_L.grid(row=0, column=1, padx=5)
+        tk.Button(self.frame_videos, text="瀏覽", command=lambda: self.browse_file(self.entry_video_L, "Video"), font=self.label_font).grid(row=0, column=2)
+
+        tk.Label(self.frame_videos, text="右視角影片:", font=self.label_font).grid(row=1, column=0, sticky="w")
+        self.entry_video_R = tk.Entry(self.frame_videos, width=50, font=self.entry_font)
         self.entry_video_R.grid(row=1, column=1, padx=5)
-        tk.Button(frame_videos, text="瀏覽", command=lambda: self.browse_file(self.entry_video_R, "Video"), font=self.label_font).grid(row=1, column=2)
+        tk.Button(self.frame_videos, text="瀏覽", command=lambda: self.browse_file(self.entry_video_R, "Video"), font=self.label_font).grid(row=1, column=2)
+
+        # 1b. Input Folders Section (For Direct Mode)
+        self.frame_folders = tk.LabelFrame(self.root, text="1. 輸入圖片資料夾 (Left / Right)", font=self.label_font, padx=10, pady=10)
+        # Hidden by default
+        
+        tk.Label(self.frame_folders, text="左圖片資料夾:", font=self.label_font).grid(row=0, column=0, sticky="w")
+        self.entry_folder_L = tk.Entry(self.frame_folders, width=50, font=self.entry_font)
+        self.entry_folder_L.grid(row=0, column=1, padx=5)
+        tk.Button(self.frame_folders, text="瀏覽", command=lambda: self.browse_dir(self.entry_folder_L), font=self.label_font).grid(row=0, column=2)
+
+        tk.Label(self.frame_folders, text="右圖片資料夾:", font=self.label_font).grid(row=1, column=0, sticky="w")
+        self.entry_folder_R = tk.Entry(self.frame_folders, width=50, font=self.entry_font)
+        self.entry_folder_R.grid(row=1, column=1, padx=5)
+        tk.Button(self.frame_folders, text="瀏覽", command=lambda: self.browse_dir(self.entry_folder_R), font=self.label_font).grid(row=1, column=2)
 
         # 2. Output Directory
         frame_out = tk.LabelFrame(self.root, text="2. 輸出設定", font=self.label_font, padx=10, pady=10)
@@ -109,6 +133,22 @@ class AutoStereoCalibrateApp:
         self.log_area = scrolledtext.ScrolledText(self.root, height=15, font=('Consolas', 9))
         self.log_area.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
+    def toggle_mode(self):
+        if self.mode_var.get() == self.MODE_FULL:
+            self.frame_folders.pack_forget()
+            self.frame_videos.pack(fill="x", padx=10, pady=5, after=self.frame_folders.master.winfo_children()[0])
+            # Re-order logic is a bit tricky with pack, let's just use fixed order
+            self.frame_videos.pack(fill="x", padx=10, pady=5, before=self.root.winfo_children()[2])
+        else:
+            self.frame_videos.pack_forget()
+            self.frame_folders.pack(fill="x", padx=10, pady=5, after=self.root.winfo_children()[0])
+
+    def browse_dir(self, entry_widget):
+        foldername = filedialog.askdirectory()
+        if foldername:
+            entry_widget.delete(0, tk.END)
+            entry_widget.insert(0, foldername)
+
     def browse_file(self, entry_widget, file_type):
         if file_type == "Video":
             ftypes = [("Video files", "*.mp4 *.avi *.mov *.mkv")]
@@ -153,20 +193,30 @@ class AutoStereoCalibrateApp:
         if self.is_running: return
         
         # 1. Gather Inputs
+        mode = self.mode_var.get()
         video_L = self.entry_video_L.get()
         video_R = self.entry_video_R.get()
+        folder_L = self.entry_folder_L.get()
+        folder_R = self.entry_folder_R.get()
         output_base = self.entry_output.get()
         npz_L = self.entry_npz_L.get()
         npz_R = self.entry_npz_R.get()
         
         # Validation
-        if not all([video_L, video_R, output_base, npz_L, npz_R]):
-            messagebox.showerror("錯誤", "所有欄位都必須填寫！")
-            return
-            
-        if not all(map(os.path.exists, [video_L, video_R, npz_L, npz_R])):
-             messagebox.showerror("錯誤", "部分輸入檔案不存在，請檢查路徑。")
-             return
+        if mode == self.MODE_FULL:
+            if not all([video_L, video_R, output_base, npz_L, npz_R]):
+                messagebox.showerror("錯誤", "完整流程模式下，影片與路徑欄位都必須填寫！")
+                return
+            if not all(map(os.path.exists, [video_L, video_R, npz_L, npz_R])):
+                messagebox.showerror("錯誤", "部分輸入檔案不存在，請檢查路徑。")
+                return
+        else:
+            if not all([folder_L, folder_R, output_base, npz_L, npz_R]):
+                messagebox.showerror("錯誤", "快速標定模式下，圖片資料夾與路徑欄位都必須填寫！")
+                return
+            if not all(map(os.path.exists, [folder_L, folder_R, npz_L, npz_R])):
+                messagebox.showerror("錯誤", "部分輸入資料夾不存在，請檢查路徑。")
+                return
 
         try:
             interval = int(self.entry_interval.get())
@@ -184,18 +234,11 @@ class AutoStereoCalibrateApp:
         self.log_area.delete(1.0, tk.END)
         
         thread = threading.Thread(target=self.run_pipeline, 
-                                  args=(video_L, video_R, output_base, npz_L, npz_R, interval, chessboard_size, square_size, target_count))
+                                  args=(mode, video_L, video_R, folder_L, folder_R, output_base, npz_L, npz_R, interval, chessboard_size, square_size, target_count))
         thread.start()
 
-    def run_pipeline(self, video_L, video_R, output_base, npz_L_path, npz_R_path, interval, chessboard_size, square_size, target_count):
+    def run_pipeline(self, mode, video_L, video_R, folder_L, folder_R, output_base, npz_L_path, npz_R_path, interval, chessboard_size, square_size, target_count):
         try:
-            # Prepare Directories
-            stereo_dir = os.path.join(output_base, "stereo")
-            left_origin = os.path.join(stereo_dir, "left", "origin_image")
-            right_origin = os.path.join(stereo_dir, "right", "origin_image")
-            left_final = os.path.join(stereo_dir, "left", "final_image")
-            right_final = os.path.join(stereo_dir, "right", "final_image")
-            
             # 0. Load Intrinsics
             self.log("Step 0: 讀取內參...")
             mtxL, distL, errL = self.load_intrinsics(npz_L_path)
@@ -206,35 +249,43 @@ class AutoStereoCalibrateApp:
             
             self.log("內參讀取成功。")
 
-            # 1. Video Frame Extraction
-            self.log("\nStep 1/6: 影片切幀...")
-            self.log(f"處理左影片: {os.path.basename(video_L)}")
-            cL = video_processor.extract_frames(video_L, left_origin, interval, self.log)
-            self.log(f"-> 左影片提取 {cL} 張")
-            
-            self.log(f"處理右影片: {os.path.basename(video_R)}")
-            cR = video_processor.extract_frames(video_R, right_origin, interval, self.log)
-            self.log(f"-> 右影片提取 {cR} 張")
+            if mode == self.MODE_FULL:
+                # Prepare Directories
+                stereo_dir = os.path.join(output_base, "stereo")
+                left_origin = os.path.join(stereo_dir, "left", "origin_image")
+                right_origin = os.path.join(stereo_dir, "right", "origin_image")
+                left_final = os.path.join(stereo_dir, "left", "final_image")
+                right_final = os.path.join(stereo_dir, "right", "final_image")
 
-            # 2. Filter (Implicit in Picker, but we ensure folders exist)
-            
-            # 3. Stereo Picking
-            self.log(f"\nStep 3: 執行 @auto_pick_stereo_img (目標: {target_count} 組)...")
-            count, final_rms = stereo_picker.run_stereo_pick(
-                left_origin, right_origin, 
-                left_final, right_final,
-                mtxL, distL, mtxR, distR,
-                chessboard_size, target_count,
-                logger=self.log
-            )
-            
-            if count == 0:
-                raise Exception("自動挑選失敗，無有效配對圖片。")
-            
-            self.log(f"-> 挑選完成，共 {count} 組，RMS: {final_rms:.4f}")
+                # 1. Video Frame Extraction
+                self.log("\nStep 1/6: 影片切幀...")
+                self.log(f"處理左影片: {os.path.basename(video_L)}")
+                cL = video_processor.extract_frames(video_L, left_origin, interval, self.log)
+                self.log(f"-> 左影片提取 {cL} 張")
+                
+                self.log(f"處理右影片: {os.path.basename(video_R)}")
+                cR = video_processor.extract_frames(video_R, right_origin, interval, self.log)
+                self.log(f"-> 右影片提取 {cR} 張")
 
-            # 4. Load NPZs Input (Already done in step 0, just ensuring flow)
-            
+                # 3. Stereo Picking
+                self.log(f"\nStep 3: 執行 @auto_pick_stereo_img (目標: {target_count} 組)...")
+                count, final_rms = stereo_picker.run_stereo_pick(
+                    left_origin, right_origin, 
+                    left_final, right_final,
+                    mtxL, distL, mtxR, distR,
+                    chessboard_size, target_count,
+                    logger=self.log
+                )
+                
+                if count == 0:
+                    raise Exception("自動挑選失敗，無有效配對圖片。")
+                
+                self.log(f"-> 挑選完成，共 {count} 組，RMS: {final_rms:.4f}")
+            else:
+                self.log("\nStep: 快速標定模式，跳過切幀與挑選步驟。")
+                left_final = folder_L
+                right_final = folder_R
+
             # 5 & 6. Stereo Calibration
             self.log(f"\nStep 5: 進行雙目標定並輸出結果...")
             stereo_npz_path = os.path.join(output_base, "stereo_rt.npz")
@@ -252,7 +303,6 @@ class AutoStereoCalibrateApp:
                 self.log(f"Ret (RMS): {res['ret']:.6f}")
                 self.log(f"Baseline: {res['baseline']:.6f} m")
                 self.log(f"Translation Vector (T):\n{res['T'].flatten()}")
-                # self.log(f"Rotation Matrix (R):\n{res['R']}")
                 self.log(f"\n結果已存於: {stereo_npz_path}")
                 messagebox.showinfo("完成", "雙目標定流程已成功完成！")
             else:
