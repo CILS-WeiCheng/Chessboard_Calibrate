@@ -14,112 +14,54 @@ def stereo_calibration(
     logger=print
 ):
     """
-    Step 5 & 6: 對 final_image 資料夾中的圖片進行雙目標定，並輸出結果。
-    參考: User Code Snippet @ 3Dprojection.ipynb
+    執行雙目相機最終標定：讀取選定配對影像 -> 執行標定 -> 輸出 R, T 與 Baseline 並儲存 .npz。
     """
+    logger(f"=== 開始雙目最終標定 ===")
     
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-5)
-    
-    # 建立棋盤格世界座標點（ Z=0 ）
     objp = np.zeros((chessboard_size[0] * chessboard_size[1], 3), np.float32)
-    objp[:, :2] = np.mgrid[0:chessboard_size[0], 0:chessboard_size[1]].T.reshape(-1, 2)
-    objp *= square_size
+    objp[:, :2] = np.mgrid[0:chessboard_size[0], 0:chessboard_size[1]].T.reshape(-1, 2) * square_size
 
-    # 讀取左右相機同一幀下的棋盤格圖片
-    left_images = sorted(glob.glob(os.path.join(left_images_dir, '*.jpg')))
-    right_images = sorted(glob.glob(os.path.join(right_images_dir, '*.jpg')))
-
-    if len(left_images) != len(right_images):
-        logger(f"[警告] 左右路徑圖片數量不一致: Left={len(left_images)}, Right={len(right_images)}")
-        # 嘗試只處理配對成功的
-        common_names = set(os.path.basename(p) for p in left_images) & set(os.path.basename(p) for p in right_images)
-        # But wait, logic assumes 'sorted' matches because filenames are like stereo_01_L_... and stereo_01_R_...
-        # So we should match by prefix ID or index if they were saved sequentially by picker.
-        # Actually, picker saves stereo_XX_L and stereo_XX_R.
-        # So sorted() should align them perfectly by ID.
-        pass
-
-    imgpoints_left = []  # 左相機圖片2D點
-    imgpoints_right = [] # 右相機圖片2D點
-    objpoints = []       # 棋盤格世界座標點
-
-    image_size = None
+    # 讀取並配對影像
+    l_imgs = []
+    for ext in ['*.png', '*.jpg', '*.jpeg', '*.PNG', '*.JPG', '*.JPEG']:
+        l_imgs.extend(glob.glob(os.path.join(left_images_dir, ext)))
+    l_imgs = sorted(l_imgs)
     
-    logger(f"開始檢測棋盤格 (共 {len(left_images)} 組)...")
-
-    for frameL, frameR in zip(left_images, right_images):
+    obj_pts, img_ptsL, img_ptsR = [], [], []
+    img_size = None
+    
+    for fl in l_imgs:
+        fr = os.path.join(right_images_dir, os.path.basename(fl).replace('_L_', '_R_'))
+        if not os.path.exists(fr): continue
         
-        # Support Chinese paths
-        def read_img_safe(path):
-            img = None
-            try:
-                with open(path, 'rb') as f:
-                    file_bytes = np.frombuffer(f.read(), np.uint8)
-                    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-            except Exception:
-                pass
-            return img
-
-        img_left = read_img_safe(frameL)
-        img_right = read_img_safe(frameR)
+        try:
+            with open(fl, 'rb') as f: il = cv2.imdecode(np.frombuffer(f.read(), np.uint8), cv2.IMREAD_COLOR)
+            with open(fr, 'rb') as f: ir = cv2.imdecode(np.frombuffer(f.read(), np.uint8), cv2.IMREAD_COLOR)
+        except Exception: continue
         
-        if img_left is None or img_right is None:
-            continue
+        if il is None or ir is None: continue
+        grayL, grayR = cv2.cvtColor(il, cv2.COLOR_BGR2GRAY), cv2.cvtColor(ir, cv2.COLOR_BGR2GRAY)
+        if img_size is None: img_size = grayL.shape[::-1]
 
-        grayL = cv2.cvtColor(img_left, cv2.COLOR_BGR2GRAY)
-        grayR = cv2.cvtColor(img_right, cv2.COLOR_BGR2GRAY)
-
-        if image_size is None:
-            image_size = grayL.shape[::-1]
-
-        retL, cornersL = cv2.findChessboardCorners(grayL, chessboard_size, None)
-        retR, cornersR = cv2.findChessboardCorners(grayR, chessboard_size, None)
-
+        retL, cL = cv2.findChessboardCorners(grayL, chessboard_size, None)
+        retR, cR = cv2.findChessboardCorners(grayR, chessboard_size, None)
         if retL and retR:
-            cornersL = cv2.cornerSubPix(grayL, cornersL, (11, 11), (-1, -1), criteria)
-            cornersR = cv2.cornerSubPix(grayR, cornersR, (11, 11), (-1, -1), criteria)
+            obj_pts.append(objp)
+            img_ptsL.append(cv2.cornerSubPix(grayL, cL, (11, 11), (-1, -1), criteria))
+            img_ptsR.append(cv2.cornerSubPix(grayR, cR, (11, 11), (-1, -1), criteria))
 
-            objpoints.append(objp)
-            imgpoints_left.append(cornersL)
-            imgpoints_right.append(cornersR)
+    if not obj_pts:
+        logger("[錯誤] 無法在圖片中檢測到棋盤格"); return None
 
-    if not objpoints:
-        logger("[錯誤] 無法在圖片中檢測到棋盤格")
-        return None
-
-    # 固定內參，僅估計 R, T 外參
-    # flags = cv2.CALIB_FIX_INTRINSIC
-    flags = cv2.CALIB_USE_INTRINSIC_GUESS # 使用者指定 Use Intrinsic Guess
-    
     logger("執行 stereoCalibrate ...")
-    ret, mtxL_opt, distL_opt, mtxR_opt, distR_opt, R, T, E, F = cv2.stereoCalibrate(
-        objpoints, imgpoints_left, imgpoints_right,
-        mtxL, distL, mtxR, distR,
-        image_size, criteria=criteria, flags=flags)
+    ret, mtxL_o, distL_o, mtxR_o, distR_o, R, T, E, F = cv2.stereoCalibrate(
+        obj_pts, img_ptsL, img_ptsR, mtxL, distL, mtxR, distR,
+        img_size, criteria=criteria, flags=cv2.CALIB_USE_INTRINSIC_GUESS)
     
-    logger(f"image_size: {image_size}")
-    logger(f"RMS (ret): {ret}")
-    
-    # Calculate Baseline
     baseline = np.linalg.norm(T)
-    logger(f"Baseline: {baseline} meters")
-
-    # Save results
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    np.savez(save_path, 
-             mtxL_opt=mtxL_opt, distL_opt=distL_opt, 
-             mtxR_opt=mtxR_opt, distR_opt=distR_opt, 
-             R=R, T=T, ret=ret, baseline=baseline)
+    np.savez(save_path, mtxL_opt=mtxL_o, distL_opt=distL_o, mtxR_opt=mtxR_o, distR_opt=distR_o, R=R, T=T, ret=ret, baseline=baseline)
              
-    logger(f"結果已儲存至: {save_path}")
-    
-    return {
-        'R': R,
-        'T': T,
-        'baseline': baseline,
-        'ret': ret,
-        'mtxL_opt': mtxL_opt,
-        'distL_opt': distL_opt,
-        'mtxR_opt': mtxR_opt,
-        'distR_opt': distR_opt
-    }
+    logger(f"標定完成。RMS: {ret:.6f}, Baseline: {baseline:.4f}m\n結果儲存至: {save_path}")
+    return {'R': R, 'T': T, 'baseline': baseline, 'ret': ret, 'mtxL_opt': mtxL_o, 'distL_opt': distL_o, 'mtxR_opt': mtxR_o, 'distR_opt': distR_o}
