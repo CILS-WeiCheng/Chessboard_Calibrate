@@ -6,12 +6,15 @@ import sys
 import numpy as np
 from pathlib import Path
 
-# Add current directory to path so utils can be imported if run from here
+# 加入當前目錄以確保 utils 可正確匯入
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
 from utils import video_processor, auto_picker, calibrator
 
 class AutoCalibrateApp:
+    """
+    單目相機自動標定 GUI 應用程式
+    功能：自動化處理「影片切幀 -> 棋盤格初篩 -> 智能影像挑選 -> 最終標定產出」的完整工作流。
+    """
     def __init__(self, root):
         self.root = root
         self.root.title("棋盤格自動標定")
@@ -32,13 +35,13 @@ class AutoCalibrateApp:
         self.create_widgets()
         
     def create_widgets(self):
-        # Mode Section
+        """初始化 UI 組件"""
+        # 1. 模式選擇
         frame_mode = tk.LabelFrame(self.root, text="執行模式", font=self.label_font, padx=10, pady=10)
         frame_mode.pack(fill="x", padx=10, pady=5)
         
-        self.combo_mode = ttk.Combobox(frame_mode, values=[
-            self.MODE_VIDEO, self.MODE_ORIGIN, self.MODE_BEST, self.MODE_FINAL
-        ], state="readonly", font=self.label_font, width=40)
+        self.combo_mode = ttk.Combobox(frame_mode, values=[self.MODE_VIDEO, self.MODE_ORIGIN, self.MODE_BEST, self.MODE_FINAL], 
+                                      state="readonly", font=self.label_font, width=40)
         self.combo_mode.current(0)
         self.combo_mode.pack(side="left", padx=5)
         self.combo_mode.bind("<<ComboboxSelected>>", self.on_mode_change)
@@ -114,210 +117,99 @@ class AutoCalibrateApp:
         self.log_area.pack(fill="both", expand=True, padx=10, pady=(0, 10))
     
     def on_mode_change(self, event):
+        """當切換模式時，動態調整輸入提示"""
         mode = self.combo_mode.get()
         self.entry_input.delete(0, tk.END)
-        self.entry_input.config(state="normal")
-        self.btn_browse_input.config(state="normal")
-        
-        if mode == self.MODE_VIDEO:
-            self.lbl_input.config(text="影片路徑:")
-            self.entry_interval.config(state="normal")
-        elif mode == self.MODE_ORIGIN:
-            self.lbl_input.config(text="原始圖片資料夾 (origin_image):")
-            self.entry_interval.config(state="disabled")
-        elif mode == self.MODE_BEST:
-            self.lbl_input.config(text="角點篩選後圖片資料夾 (best_image):")
-            self.entry_interval.config(state="disabled")
-        elif mode == self.MODE_FINAL:
-            self.lbl_input.config(text="自動選取後圖片資料夾 (final_img):")
-            self.entry_interval.config(state="disabled")
+        mapping = {self.MODE_VIDEO: "影片路徑:", self.MODE_ORIGIN: "原始圖片資料夾 (origin_image):",
+                   self.MODE_BEST: "初篩後圖片資料夾 (best_image):", self.MODE_FINAL: "最終圖片資料夾 (final_img):"}
+        self.lbl_input.config(text=mapping.get(mode, "路徑:"))
+        self.entry_interval.config(state="normal" if mode == self.MODE_VIDEO else "disabled")
 
     def browse_input(self):
         mode = self.combo_mode.get()
         if mode == self.MODE_VIDEO:
-            filename = filedialog.askopenfilename(filetypes=[("Video files", "*.mp4 *.avi *.mov")])
-            if filename:
-                self.entry_input.delete(0, tk.END)
-                self.entry_input.insert(0, filename)
-        else:
-            foldername = filedialog.askdirectory()
-            if foldername:
-                self.entry_input.delete(0, tk.END)
-                self.entry_input.insert(0, foldername)
-            
+            path = filedialog.askopenfilename(filetypes=[("Video", "*.mp4 *.avi *.mov")])
+        else: path = filedialog.askdirectory()
+        if path: self.entry_input.delete(0, tk.END); self.entry_input.insert(0, path)
+
     def browse_output(self):
-        foldername = filedialog.askdirectory()
-        if foldername:
-            self.entry_output.delete(0, tk.END)
-            self.entry_output.insert(0, foldername)
+        path = filedialog.askdirectory()
+        if path: self.entry_output.delete(0, tk.END); self.entry_output.insert(0, path)
 
     def browse_npz(self):
-        filename = filedialog.askopenfilename(filetypes=[("NPZ files", "*.npz")])
-        if filename:
-            self.entry_npz.delete(0, tk.END)
-            self.entry_npz.insert(0, filename)
+        path = filedialog.askopenfilename(filetypes=[("NPZ", "*.npz")])
+        if path: self.entry_npz.delete(0, tk.END); self.entry_npz.insert(0, path)
             
     def log(self, message):
-        self.log_area.insert(tk.END, message + "\n")
-        self.log_area.see(tk.END)
+        """日誌輸出至介面與終端機"""
+        self.log_area.insert(tk.END, message + "\n"); self.log_area.see(tk.END)
         print(message)
         
     def inspect_npz(self):
-        filename = self.entry_npz.get()
-        if not filename or not os.path.exists(filename):
-            messagebox.showerror("錯誤", "請先選擇有效的 .npz 檔案")
-            return
-            
+        """解構並顯示 .npz 檔案內容"""
+        fn = self.entry_npz.get()
+        if not fn or not os.path.exists(fn): messagebox.showerror("錯誤", "無效的 NPZ 檔案"); return
         try:
-            data = np.load(filename, allow_pickle=True)
-            info = []
-            info.append(f"檔案: {os.path.basename(filename)}")
-            info.append("-" * 30)
-            
-            for key in data.files:
-                val = data[key]
-                info.append(f"Key: {key}")
-                if isinstance(val, np.ndarray):
-                    info.append(f"  Shape: {val.shape}")
-                    if val.size < 10:
-                        info.append(f"  Value: {val}")
-                elif isinstance(val, dict) or (val.dtype == 'O' and val.ndim == 0):
-                    # Try to handle object/dict stored in npz
-                    item = val.item() if val.shape == () else val
-                    info.append(f"  Content: {item}")
-                else:
-                    info.append(f"  Type: {type(val)}")
-                info.append("")
-                
-            # Show in a new window
-            top = tk.Toplevel(self.root)
-            top.title("NPZ 內容")
-            top.geometry("600x500")
-            text_area = scrolledtext.ScrolledText(top, font=('Consolas', 12))
-            text_area.pack(fill="both", expand=True)
-            text_area.insert(tk.END, "\n".join(info))
-            
-        except Exception as e:
-            messagebox.showerror("錯誤", f"無法讀取 NPZ: {e}")
+            data = np.load(fn, allow_pickle=True)
+            info = [f"檔案: {os.path.basename(fn)}", "-"*30]
+            for k in data.files:
+                v = data[k]
+                info.append(f"Key: {k}\n  Shape: {v.shape if hasattr(v, 'shape') else 'N/A'}\n  Value: {v if v.size < 15 else '...大型矩陣...'}\n")
+            top = tk.Toplevel(self.root); top.title("NPZ 內容")
+            txt = scrolledtext.ScrolledText(top, font=('Consolas', 11)); txt.pack(fill="both", expand=True)
+            txt.insert(tk.END, "\n".join(info))
+        except Exception as e: messagebox.showerror("錯誤", f"讀取失敗: {e}")
 
     def start_process(self):
-        if self.is_running:
-            return
-            
-        mode = self.combo_mode.get()
-        input_path = self.entry_input.get()
-        output_base = self.entry_output.get()
-        
-        if not output_base:
-            messagebox.showerror("錯誤", "請選擇輸出目錄")
-            return
-            
-        if not input_path or not os.path.exists(input_path):
-            messagebox.showerror("錯誤", "輸入路徑無效")
-            return
-            
+        """啟動非同步流水線執行"""
+        if self.is_running: return
         try:
-            interval = int(self.entry_interval.get())
-            cols = int(self.entry_cols.get())
-            rows = int(self.entry_rows.get())
-            square_size = float(self.entry_square.get())
-            target_count = int(self.entry_count.get())
-        except ValueError:
-            messagebox.showerror("錯誤", "參數格式錯誤，請檢查數字欄位")
-            return
+            params = {
+                'mode': self.combo_mode.get(), 'input_path': self.entry_input.get(), 'output_base': self.entry_output.get(),
+                'interval': int(self.entry_interval.get()), 'chessboard_size': (int(self.entry_cols.get()), int(self.entry_rows.get())),
+                'square_size': float(self.entry_square.get()), 'target_count': int(self.entry_count.get())
+            }
+        except ValueError: messagebox.showerror("錯誤", "參數格式不正確"); return
             
+        if not params['output_base'] or not os.path.exists(params['input_path']):
+            messagebox.showerror("錯誤", "路徑無效"); return
+
         self.is_running = True
         self.btn_start.config(state="disabled", text="執行中...")
         self.log_area.delete(1.0, tk.END)
-        
-        thread = threading.Thread(target=self.run_pipeline, 
-                                  args=(mode, input_path, output_base, interval, (cols, rows), square_size, target_count))
-        thread.start()
+        threading.Thread(target=self.run_pipeline, kwargs=params).start()
         
     def run_pipeline(self, mode, input_path, output_base, interval, chessboard_size, square_size, target_count):
+        """核心自動化流水線邏輯"""
         try:
-            # Prepare default output folders
-            origin_dir = os.path.join(output_base, "origin_image")
-            best_dir = os.path.join(output_base, "best_image")
-            final_dir = os.path.join(output_base, "final_img")
+            dirs = {k: os.path.join(output_base, k) for k in ["origin_image", "best_image", "final_img"]}
             
-            # Step 1: Extract Frames
+            # Step 1: 影片切幀
+            cur_dir = input_path
             if mode == self.MODE_VIDEO:
-                self.log("Step 1/6: 開始提取影片幀...")
-                # input_path is Video File
-                count = video_processor.extract_frames(input_path, origin_dir, interval, progress_callback=self.log)
-                self.log(f"-> 提取完成，共 {count} 張圖片儲存於 {origin_dir}")
-                current_input_dir = origin_dir # Pass to next step
-            else:
-                self.log("Step 1: 跳過影片提取 (依據選擇模式)")
-                current_input_dir = None
+                self.log("Step 1: 提取影片幀..."); video_processor.extract_frames(input_path, dirs["origin_image"], interval, self.log)
+                cur_dir = dirs["origin_image"]
             
-            # Step 2 & 3: Filter Valid Images
+            # Step 2 & 3: 初步篩選
             if mode in [self.MODE_VIDEO, self.MODE_ORIGIN]:
-                if mode == self.MODE_ORIGIN:
-                    # input_path is Origin Folder
-                    current_input_dir = input_path
-                    # We might want to use the user-provided folder as 'origin_dir' for clarity using absolute paths?
-                    # But the filter function copies FROM source TO best_dir.
-                    # So current_input_dir is correct.
-                
-                self.log(f"\nStep 2 & 3: 篩選完整棋盤格圖片 (來源: {current_input_dir})...")
-                
-                if not os.path.exists(current_input_dir) or not os.listdir(current_input_dir):
-                     raise Exception(f"原始圖片目錄不存在或為空: {current_input_dir}")
-                     
-                valid_count = video_processor.filter_valid_images(current_input_dir, best_dir, chessboard_size, progress_callback=self.log)
-                self.log(f"-> 篩選完成，共 {valid_count} 張有效圖片儲存於 {best_dir}")
-                
-                if valid_count == 0:
-                    raise Exception("沒有找到任何有效的棋盤格圖片，流程終止。")
-            else:
-                self.log("Step 2 & 3: 跳過圖片篩選 (依據選擇模式)")
+                self.log(f"\nStep 2 & 3: 篩選棋盤格影像 (來源: {cur_dir})...")
+                video_processor.filter_valid_images(cur_dir, dirs["best_image"], chessboard_size, self.log)
+                cur_dir = dirs["best_image"]
 
-            # Step 4: Auto Pick
+            # Step 4: 智能挑選
             if mode in [self.MODE_VIDEO, self.MODE_ORIGIN, self.MODE_BEST]:
-                if mode == self.MODE_BEST:
-                    best_dir = input_path # Override implicit best_dir with user input
-                
-                self.log(f"\nStep 4: 智慧挑選最佳的 {target_count} 張圖片 (來源: {best_dir})...")
-                if not os.path.exists(best_dir) or not os.listdir(best_dir):
-                     raise Exception(f"篩選後圖片目錄不存在或為空: {best_dir}")
-                     
-                auto_picker.run_auto_pick(best_dir, final_dir, chessboard_size, square_size, target_count, logger=self.log)
-                self.log(f"-> 挑選完成，結果儲存於 {final_dir}")
-            else:
-                 self.log("Step 4: 跳過智慧挑選 (依據選擇模式)")
+                self.log(f"\nStep 4: 執行智慧挑選 (目標: {target_count} 張)...")
+                auto_picker.run_auto_pick(cur_dir, dirs["final_img"], chessboard_size, square_size, target_count, self.log)
+                cur_dir = dirs["final_img"]
 
-            # Step 5 & 6: Calibration
-            self.log("\nStep 5 & 6: 執行最終標定並輸出報告...")
-            
-            if mode == self.MODE_FINAL:
-                final_dir = input_path # Override implicit final_dir with user input
-                
-            source_pattern = os.path.join(final_dir, "*.jpg")
-            if not video_processor.Path(final_dir).exists():
-                 raise Exception(f"最終圖片目錄不存在: {final_dir}")
-            
-            npz_path = os.path.join(output_base, "calibration_result.npz")
-            
-            results = calibrator.calibration_final(source_pattern, npz_path, chessboard_size, square_size, logger=self.log)
-            
-            if results:
-                self.log(f"-> 標定成功！")
-                self.log(f"平均重投影誤差: {results['mean_reprojection_error']:.6f}")
-                messagebox.showinfo("完成", "全自動標定流程已成功完成！")
-            else:
-                self.log("-> 標定失敗，請檢查日誌。")
-                messagebox.showwarning("失敗", "標定過程發生錯誤")
-
+            # Step 5 & 6: 標定產出
+            self.log("\nStep 5 & 6: 執行最終標定..."); npz_path = os.path.join(output_base, "calibration_result.npz")
+            res = calibrator.calibration_final(os.path.join(cur_dir, "*.jpg"), npz_path, chessboard_size, square_size, self.log)
+            if res: messagebox.showinfo("完成", f"標定成功！RMS: {res['mean_reprojection_error']:.6f}")
         except Exception as e:
-            self.log(f"\n[嚴重錯誤] 流程發生異常: {str(e)}")
-            import traceback
-            self.log(traceback.format_exc())
-            messagebox.showerror("錯誤", f"發生異常: {str(e)}")
+            self.log(f"\n[嚴重錯誤]: {e}"); messagebox.showerror("錯誤", str(e))
         finally:
-            self.is_running = False
-            self.btn_start.config(state="normal", text="開始執行")
+            self.is_running = False; self.btn_start.config(state="normal", text="開始執行")
 
 if __name__ == "__main__":
     root = tk.Tk()
