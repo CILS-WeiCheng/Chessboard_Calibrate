@@ -18,7 +18,7 @@ class AutoStereoCalibrateApp:
         self.root.geometry("700x900")
         self.is_running = False
         self.label_font, self.entry_font = ('Microsoft JhengHei', 10), ('Arial', 10)
-        self.MODE_FULL, self.MODE_DIRECT = "FULL", "DIRECT"
+        self.MODE_FULL, self.MODE_PICK, self.MODE_DIRECT = "FULL", "PICK", "DIRECT"
         self.mode_var = tk.StringVar(value=self.MODE_FULL)
         self.create_widgets()
         
@@ -27,7 +27,12 @@ class AutoStereoCalibrateApp:
         # 0. 模式切換
         frame_mode = tk.LabelFrame(self.root, text="工作模式", font=self.label_font, padx=10, pady=5)
         frame_mode.pack(fill="x", padx=10, pady=5)
-        for t, v in [("完整流程 (影片)", self.MODE_FULL), ("快速標定 (資料夾)", self.MODE_DIRECT)]:
+        modes = [
+            ("完整流程 (影片)", self.MODE_FULL), 
+            ("智慧挑選+標定 (資料夾)", self.MODE_PICK),
+            ("快速標定 (僅標定)", self.MODE_DIRECT)
+        ]
+        for t, v in modes:
             tk.Radiobutton(frame_mode, text=t, variable=self.mode_var, value=v, 
                            command=self.toggle_mode, font=self.label_font).pack(side="left", padx=10)
 
@@ -82,7 +87,8 @@ class AutoStereoCalibrateApp:
 
     def toggle_mode(self):
         """切換輸入模式介面"""
-        if self.mode_var.get() == self.MODE_FULL:
+        mode = self.mode_var.get()
+        if mode == self.MODE_FULL:
             self.f_d.pack_forget(); self.f_v.pack(fill="x", padx=10, pady=5)
         else:
             self.f_v.pack_forget(); self.f_d.pack(fill="x", padx=10, pady=5)
@@ -133,7 +139,7 @@ class AutoStereoCalibrateApp:
             if eL or eR: raise Exception(f"內參讀取失敗: {eL or eR}")
 
             if mode == self.MODE_FULL:
-                dirs = {k: os.path.join(out, "stereo", side, k) for side in ["left", "right"] for k in ["origin_image", "final_image"]}
+                dirs = {f"{side}{k}": os.path.join(out, "stereo", side, k) for side in ["left", "right"] for k in ["origin_image", "final_image"]}
                 self.log("\nStep 1: 提取影片幀..."); video_processor.extract_frames(vL, dirs["leftorigin_image"], interval, self.log)
                 video_processor.extract_frames(vR, dirs["rightorigin_image"], interval, self.log)
                 
@@ -141,7 +147,15 @@ class AutoStereoCalibrateApp:
                     dirs["leftorigin_image"], dirs["rightorigin_image"], dirs["leftfinal_image"], dirs["rightfinal_image"],
                     mL, dL_o, mR, dR_o, size, count, self.log)
                 fL, fR = dirs["leftfinal_image"], dirs["rightfinal_image"]
+            elif mode == self.MODE_PICK:
+                # 從現有資料夾挑選
+                dirs = {f"{side}final_image": os.path.join(out, "stereo", side, "final_image") for side in ["left", "right"]}
+                self.log(f"\nStep 3: 智慧挑選影像對 (目標: {count})..."); stereo_picker.run_stereo_pick(
+                    dL, dR, dirs["leftfinal_image"], dirs["rightfinal_image"],
+                    mL, dL_o, mR, dR_o, size, count, self.log)
+                fL, fR = dirs["leftfinal_image"], dirs["rightfinal_image"]
             else:
+                # 直接標定
                 fL, fR = dL, dR
 
             self.log("\nStep 5: 執行雙目最終標定...")
