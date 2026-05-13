@@ -57,7 +57,7 @@ def stereo_calibration(
     logger("執行 stereoCalibrate ...")
     ret, mtxL_o, distL_o, mtxR_o, distR_o, R, T, E, F = cv2.stereoCalibrate(
         obj_pts, img_ptsL, img_ptsR, mtxL, distL, mtxR, distR,
-        img_size, criteria=criteria, flags=cv2.CALIB_USE_INTRINSIC_GUESS)
+        img_size, criteria=criteria, flags=cv2.CALIB_FIX_INTRINSIC)
     
     baseline = np.linalg.norm(T)
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
