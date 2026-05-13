@@ -299,7 +299,8 @@ class OptimizedStereoChessboardSelector:
                 self.mtxL, self.distL, self.mtxR, self.distR,
                 img_size,
                 criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-5),
-                flags=cv2.CALIB_USE_INTRINSIC_GUESS,
+                # flags=cv2.CALIB_USE_INTRINSIC_GUESS
+                flags=cv2.CALIB_FIX_INTRINSIC       
             )
             return float(ret), M1, D1, M2, D2, R, T
         except Exception:
