@@ -1,4 +1,5 @@
 import cv2
+import math
 import numpy as np
 import os
 import shutil
@@ -80,7 +81,16 @@ class OptimizedSingleChessboardSelector:
                 refined = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
                 feats = self.calculate_geometry_features(refined, gray.shape)
                 
-                score = (feats['coverage'] * 100) * (1.0 + feats['angle'] / 30.0)
+                # 評分機制：
+                # 1. 面積覆蓋率使用 log-scale，避免過大面積主導分數
+                # 2. 傾斜角獎勵：45° 傾斜得到最高獎勵，強制引導系統選取有傾斜的圖片
+                #    這是避免「範例 B 陷阱」（只選正對鏡頭圖片，RMS 低但焦距算錯）的關鍵
+                # 3. 傾斜角不足時（< 15°）施加懲罰，避免純正面圖片進入最終組合
+                coverage_score = math.log1p(feats['coverage'] * 100)
+                angle_abs = feats['angle']
+                angle_bonus = angle_abs / 45.0  # 45° 為滿分基準
+                angle_penalty = max(0.0, 1.0 - angle_abs / 15.0) * 0.5  # < 15° 時懲罰
+                score = coverage_score * (1.0 + angle_bonus) * (1.0 - angle_penalty)
                 
                 valid_data.append({
                     'path': str(img_path), 'filename': img_path.name,
@@ -143,7 +153,12 @@ class OptimizedSingleChessboardSelector:
             current_paths = {x['path'] for x in selected}
             pool = [x for x in sorted_candidates if x['path'] not in current_paths]
             if pool:
-                feats = np.array([[x['angle'], x['scale']] for x in pool])
+                # 擴充至 4 維特徵：[angle, scale, center_x, center_y]
+                # 加入棋盤格位置特徵，確保 K-Means 能抽樣到畫面四周（主點精度保障）
+                feats = np.array([
+                    [x['angle'], x['scale'], x['center_x'], x['center_y']]
+                    for x in pool
+                ])
                 feats = (feats - feats.mean(axis=0)) / (feats.std(axis=0) + 1e-5)
                 n_clusters = min(needed, len(pool))
                 kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10).fit(feats)

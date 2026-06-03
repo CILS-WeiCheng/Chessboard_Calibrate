@@ -64,14 +64,43 @@ def calibration_final(
         per_view_errors.append(err)
 
     mean_err = np.mean(per_view_errors)
+    
+    # ── 參數合理性驗證 ──────────────────────────────────────────────────────────
+    fx, fy = mtx[0, 0], mtx[1, 1]
+    cx, cy = mtx[0, 2], mtx[1, 2]
+    img_w, img_h = img_shape
+
+    # 驗證1：焦距一致性（正方形像素的相機 fx 與 fy 應小於 1%）
+    focal_diff_pct = abs(fx - fy) / min(fx, fy) * 100
+    if focal_diff_pct > 2.0:
+        logger(f"\u26a0️  [焦距警告] fx ({fx:.1f}) 與 fy ({fy:.1f}) 差異 {focal_diff_pct:.2f}%，"
+               f"超過 2%！詳診：標定圖片可能缺乏足夠傾斜角，"
+               f"焦距检測存在數學模糊性。建議重新拍攝包含大傾斜角的標定圖片後再標定。")
+    else:
+        logger(f"✅ [焦距驗證通過] fx ({fx:.1f}) 與 fy ({fy:.1f}) 差異 {focal_diff_pct:.2f}%，符合正方形像素標準。")
+
+    # 驗證2：主點偽移量（應要跟團片寬高的一半接近）
+    cx_expected, cy_expected = img_w / 2.0, img_h / 2.0
+    cx_dev = abs(cx - cx_expected)
+    cy_dev = abs(cy - cy_expected)
+    if cx_dev > 30 or cy_dev > 30:
+        logger(f"\u26a0️  [主點警告] cx={cx:.1f} (期望~{cx_expected:.0f}, 偏移 {cx_dev:.1f}px), "
+               f"cy={cy:.1f} (期望~{cy_expected:.0f}, 偏移 {cy_dev:.1f}px)。"
+               f"偏移超過 30 像素！標定圖片可能未覆蓋畫面邊緣，導致畜變系數與主點無法正確分離。")
+    else:
+        logger(f"✅ [主點驗證通過] cx={cx:.1f}, cy={cy:.1f} （偏移分別為 {cx_dev:.1f}px, {cy_dev:.1f}px）。")
+    
     validation_results = {
         'mean_reprojection_error': mean_err,
         'max_reprojection_error': max(per_view_errors),
         'min_reprojection_error': min(per_view_errors),
         'std_reprojection_error': np.std(per_view_errors),
         'per_view_errors': per_view_errors,
-        'focal_lengths': (mtx[0, 0], mtx[1, 1]),
-        'principal_point': (mtx[0, 2], mtx[1, 2]),
+        'focal_lengths': (fx, fy),
+        'focal_diff_pct': focal_diff_pct,
+        'principal_point': (cx, cy),
+        'cx_deviation_px': cx_dev,
+        'cy_deviation_px': cy_dev,
         'distortion_coeffs': dist[0].tolist()
     }
 
