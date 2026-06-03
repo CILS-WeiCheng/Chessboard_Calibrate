@@ -60,8 +60,44 @@ def stereo_calibration(
         img_size, criteria=criteria, flags=cv2.CALIB_FIX_INTRINSIC)
     
     baseline = np.linalg.norm(T)
+    
+    # ── 極線誤差驗證（Epipolar Geometry Quality Check）───────────────────────
+    # 極線誤差為校正前左右對應角點的 Y 座標差（理想值应要為 0）
+    # 是評估雙目外參（R, T）品質最直接的指標，比 RMS 更能反映三角測量的潛在精度
+    # 標準：< 0.5 像素（優良），< 0.3 像素（很優）
+    epi_errors = []
+    for ptsL, ptsR in zip(img_ptsL, img_ptsR):
+        for ptL, ptR in zip(ptsL, ptsR):
+            # Y 座標差即為極線偏差
+            epi_err = abs(float(ptL[0][1]) - float(ptR[0][1]))
+            epi_errors.append(epi_err)
+    
+    mean_epi_err = float(np.mean(epi_errors)) if epi_errors else float('inf')
+    max_epi_err = float(np.max(epi_errors)) if epi_errors else float('inf')
+    
+    if mean_epi_err < 0.3:
+        logger(f"✅ [極線誤差很優] 平均: {mean_epi_err:.4f} px, 最大: {max_epi_err:.4f} px（標準: < 0.3 px）")
+    elif mean_epi_err < 0.5:
+        logger(f"✅ [極線誤差優良] 平均: {mean_epi_err:.4f} px, 最大: {max_epi_err:.4f} px（標準: < 0.5 px）")
+    else:
+        logger(f"⚠️  [極線誤差警告] 平均: {mean_epi_err:.4f} px, 最大: {max_epi_err:.4f} px（超過 0.5 px！）"
+               f"外參 R, T 計算危險，將導致三角測量射線無法相交，建議重新標定。")
+
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    np.savez(save_path, mtxL_opt=mtxL_o, distL_opt=distL_o, mtxR_opt=mtxR_o, distR_opt=distR_o, R=R, T=T, ret=ret, baseline=baseline)
+    np.savez(
+        save_path,
+        mtxL_opt=mtxL_o, distL_opt=distL_o,
+        mtxR_opt=mtxR_o, distR_opt=distR_o,
+        R=R, T=T, ret=ret, baseline=baseline,
+        mean_epipolar_error=mean_epi_err,
+        max_epipolar_error=max_epi_err
+    )
              
     logger(f"標定完成。RMS: {ret:.6f}, Baseline: {baseline:.4f}m\n結果儲存至: {save_path}")
-    return {'R': R, 'T': T, 'baseline': baseline, 'ret': ret, 'mtxL_opt': mtxL_o, 'distL_opt': distL_o, 'mtxR_opt': mtxR_o, 'distR_opt': distR_o}
+    return {
+        'R': R, 'T': T, 'baseline': baseline, 'ret': ret,
+        'mtxL_opt': mtxL_o, 'distL_opt': distL_o,
+        'mtxR_opt': mtxR_o, 'distR_opt': distR_o,
+        'mean_epipolar_error': mean_epi_err,
+        'max_epipolar_error': max_epi_err
+    }

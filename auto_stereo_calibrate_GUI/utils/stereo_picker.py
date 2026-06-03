@@ -389,7 +389,7 @@ class OptimizedStereoChessboardSelector:
         temperature = _SA_INIT_TEMP
         no_improve_count = 0
 
-        for it in range(100):
+        for it in range(150):
             if rms <= target_rmse:
                 break
             if no_improve_count >= _MAX_NO_IMPROVE:
@@ -594,6 +594,6 @@ def run_stereo_pick(
     )
     if sel.analyze_and_pair(left_dir, right_dir, logger) == 0:
         return 0, 0.0
-    selected, rms = sel.select_best_pairs(target_rmse=0.5, logger=logger)
+    selected, rms = sel.select_best_pairs(target_rmse=0.3, logger=logger)
     sel.save_results(selected, rms, out_left, out_right, logger)
     return len(selected), rms
