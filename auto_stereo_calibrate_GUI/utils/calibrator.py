@@ -62,15 +62,20 @@ def stereo_calibration(
     baseline = np.linalg.norm(T)
     
     # ── 極線誤差驗證（Epipolar Geometry Quality Check）───────────────────────
-    # 極線誤差為校正前左右對應角點的 Y 座標差（理想值应要為 0）
+    # 真正的極線誤差為標定點到對應極線（由 Fundamental Matrix 算得）的距離。
     # 是評估雙目外參（R, T）品質最直接的指標，比 RMS 更能反映三角測量的潛在精度
     # 標準：< 0.5 像素（優良），< 0.3 像素（很優）
     epi_errors = []
     for ptsL, ptsR in zip(img_ptsL, img_ptsR):
-        for ptL, ptR in zip(ptsL, ptsR):
-            # Y 座標差即為極線偏差
-            epi_err = abs(float(ptL[0][1]) - float(ptR[0][1]))
-            epi_errors.append(epi_err)
+        pts1 = ptsL.reshape(-1, 2)
+        pts2 = ptsR.reshape(-1, 2)
+        
+        # 針對左圖的點，計算其在右圖上的極線
+        lines2 = cv2.computeCorrespondEpilines(pts1, 1, F).reshape(-1, 3)
+        for pt2, l2 in zip(pts2, lines2):
+            # 計算點 pt2 到線 l2 (ax + by + c = 0) 的幾何距離
+            dist_val = abs(l2[0]*pt2[0] + l2[1]*pt2[1] + l2[2]) / np.sqrt(l2[0]**2 + l2[1]**2)
+            epi_errors.append(dist_val)
     
     mean_epi_err = float(np.mean(epi_errors)) if epi_errors else float('inf')
     max_epi_err = float(np.max(epi_errors)) if epi_errors else float('inf')

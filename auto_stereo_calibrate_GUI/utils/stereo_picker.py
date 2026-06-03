@@ -139,8 +139,24 @@ class OptimizedStereoChessboardSelector:
 
         x_rng, y_rng = np.max(pts, axis=0) - np.min(pts, axis=0)
 
-        # 有符號角度，保留旋轉方向資訊（優化 9）
-        vec = pts[self.chessboard_size[0] - 1] - pts[0]
+        W, H = self.chessboard_size
+        top_left = pts[0]
+        top_right = pts[W - 1]
+        bottom_left = pts[(H - 1) * W]
+        bottom_right = pts[H * W - 1]
+
+        # 真正衡量焦距與標定品質的是 out-of-plane tilt (透視變形量)
+        top_len = np.linalg.norm(top_right - top_left)
+        bottom_len = np.linalg.norm(bottom_right - bottom_left)
+        left_len = np.linalg.norm(bottom_left - top_left)
+        right_len = np.linalg.norm(bottom_right - top_right)
+        
+        tilt_x = abs(top_len - bottom_len) / max(top_len, bottom_len, 1e-5)
+        tilt_y = abs(left_len - right_len) / max(left_len, right_len, 1e-5)
+        tilt = float(tilt_x + tilt_y)
+
+        # 有符號角度，保留平面旋轉方向資訊（優化 9）
+        vec = top_right - top_left
         raw_angle = np.degrees(np.arctan2(vec[1], vec[0]))
         # 折疊至 -90°~+90° 保留正負號
         if raw_angle > 90:
@@ -154,6 +170,7 @@ class OptimizedStereoChessboardSelector:
             'center_y': float(cy),
             'region': int(region),
             'coverage': float((x_rng * y_rng) / (w * h)),
+            'tilt': tilt,
             'angle': signed_angle,
             'scale': float((x_rng / w + y_rng / h) / 2.0),
         }
@@ -193,10 +210,14 @@ class OptimizedStereoChessboardSelector:
         static_err = self.calculate_static_reprojection_error(refined, mtx, dist)
 
         # 優化 4：log-scale 正規化評分，避免 error<1 放大問題
+        # 修改為使用透視變形量 (tilt) 作為主要獎勵，而非平面旋轉角
         coverage_score = math.log1p(feats['coverage'] * 100)
-        angle_score = 1.0 + abs(feats['angle']) / 90.0
+        tilt = feats['tilt']
+        tilt_bonus = min(tilt / 0.15, 1.0)
+        tilt_penalty = max(0.0, 1.0 - tilt / 0.03) * 0.5
+        
         error_penalty = 1.0 / (1.0 + static_err)
-        score = coverage_score * angle_score * error_penalty
+        score = coverage_score * (1.0 + tilt_bonus) * (1.0 - tilt_penalty) * error_penalty
 
         return {
             'path': str(img_path),
@@ -351,9 +372,11 @@ class OptimizedStereoChessboardSelector:
         if needed > 0:
             pool = [x for x in candidates if x not in selected]
             if pool:
-                # 6 維特徵：[angle_L, angle_R, scale_L, scale_R, center_x, center_y]
+                # 8 維特徵：包含左右畫面的 tilt 與角度，確保多樣性
                 feats = np.array([
                     [
+                        x['left']['tilt'],
+                        x['right']['tilt'],
                         x['left']['angle'],
                         x['right']['angle'],
                         x['left']['scale'],
