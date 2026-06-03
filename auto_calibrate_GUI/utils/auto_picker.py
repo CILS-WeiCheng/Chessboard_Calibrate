@@ -44,12 +44,29 @@ class OptimizedSingleChessboardSelector:
         y_range = np.ptp(corners_2d[:, 1])
         coverage = float((x_range * y_range) / (w * h))
         
-        vec = corners_2d[self.chessboard_size[0]-1] - corners_2d[0]
-        angle = abs(np.degrees(np.arctan2(vec[1], vec[0])))
-        if angle > 90: angle = 180 - angle
+        W, H = self.chessboard_size
+        top_left = corners_2d[0]
+        top_right = corners_2d[W - 1]
+        bottom_left = corners_2d[(H - 1) * W]
+        bottom_right = corners_2d[H * W - 1]
+        
+        # 真正衡量焦距計算好壞的是 out-of-plane tilt (透視變形量)，而非平面旋轉角
+        top_len = np.linalg.norm(top_right - top_left)
+        bottom_len = np.linalg.norm(bottom_right - bottom_left)
+        left_len = np.linalg.norm(bottom_left - top_left)
+        right_len = np.linalg.norm(bottom_right - top_right)
+        
+        tilt_x = abs(top_len - bottom_len) / max(top_len, bottom_len, 1e-5)
+        tilt_y = abs(left_len - right_len) / max(left_len, right_len, 1e-5)
+        tilt = float(tilt_x + tilt_y)
+        
+        # 保留平面旋轉角以供 K-Means 增加多樣性
+        vec = top_right - top_left
+        angle = np.degrees(np.arctan2(vec[1], vec[0]))
         
         return {'center_x': center_x, 'center_y': center_y, 'region': region,
-                'coverage': coverage, 'angle': angle, 'scale': float((x_range/w + y_range/h)/2)}
+                'coverage': coverage, 'tilt': tilt, 'angle': float(angle), 
+                'scale': float((x_range/w + y_range/h)/2)}
 
     def analyze_images(self, input_dir):
         """批次讀取並分析影像，提取候選棋盤格數據"""
@@ -86,11 +103,13 @@ class OptimizedSingleChessboardSelector:
                 # 2. 傾斜角獎勵：45° 傾斜得到最高獎勵，強制引導系統選取有傾斜的圖片
                 #    這是避免「範例 B 陷阱」（只選正對鏡頭圖片，RMS 低但焦距算錯）的關鍵
                 # 3. 傾斜角不足時（< 15°）施加懲罰，避免純正面圖片進入最終組合
+                # 2. 透視變形獎勵：tilt 越高代表有出平面傾斜，對焦距計算幫助極大
+                # 3. 變形不足時施加懲罰，避免只選到純正面（平行）圖片
                 coverage_score = math.log1p(feats['coverage'] * 100)
-                angle_abs = feats['angle']
-                angle_bonus = angle_abs / 45.0  # 45° 為滿分基準
-                angle_penalty = max(0.0, 1.0 - angle_abs / 15.0) * 0.5  # < 15° 時懲罰
-                score = coverage_score * (1.0 + angle_bonus) * (1.0 - angle_penalty)
+                tilt = feats['tilt']
+                tilt_bonus = min(tilt / 0.15, 1.0)  # tilt=0.15 為滿分基準
+                tilt_penalty = max(0.0, 1.0 - tilt / 0.03) * 0.5  # tilt < 0.03 時懲罰
+                score = coverage_score * (1.0 + tilt_bonus) * (1.0 - tilt_penalty)
                 
                 valid_data.append({
                     'path': str(img_path), 'filename': img_path.name,
@@ -153,10 +172,10 @@ class OptimizedSingleChessboardSelector:
             current_paths = {x['path'] for x in selected}
             pool = [x for x in sorted_candidates if x['path'] not in current_paths]
             if pool:
-                # 擴充至 4 維特徵：[angle, scale, center_x, center_y]
-                # 加入棋盤格位置特徵，確保 K-Means 能抽樣到畫面四周（主點精度保障）
+                # 擴充特徵：[tilt, angle, scale, center_x, center_y]
+                # 加入棋盤格位置特徵，確保 K-Means 能抽樣到畫面四周與不同傾斜度
                 feats = np.array([
-                    [x['angle'], x['scale'], x['center_x'], x['center_y']]
+                    [x['tilt'], x['angle'], x['scale'], x['center_x'], x['center_y']]
                     for x in pool
                 ])
                 feats = (feats - feats.mean(axis=0)) / (feats.std(axis=0) + 1e-5)
