@@ -301,10 +301,10 @@ class OptimizedStereoChessboardSelector:
     def perform_stereo_calibration(
         self,
         selected_pairs: List[Dict[str, Any]],
-    ) -> Tuple[float, Any, Any, Any, Any, Any, Any]:
+    ) -> Tuple[float, Any, Any, Any, Any, Any, Any, Any, Any]:
         """執行雙目相機初步標定並返回 RMS 與參數。"""
         if not selected_pairs:
-            return float('inf'), None, None, None, None, None, None
+            return float('inf'), None, None, None, None, None, None, None, None
 
         objpoints = [self.objp] * len(selected_pairs)
         imgptsL = [p['left']['corners'] for p in selected_pairs]
@@ -315,7 +315,7 @@ class OptimizedStereoChessboardSelector:
         img_size = (w, h)
 
         try:
-            ret, M1, D1, M2, D2, R, T, _, _ = cv2.stereoCalibrate(
+            ret, M1, D1, M2, D2, R, T, E, F = cv2.stereoCalibrate(
                 objpoints, imgptsL, imgptsR,
                 self.mtxL, self.distL, self.mtxR, self.distR,
                 img_size,
@@ -323,37 +323,130 @@ class OptimizedStereoChessboardSelector:
                 # flags=cv2.CALIB_USE_INTRINSIC_GUESS
                 flags=cv2.CALIB_FIX_INTRINSIC       
             )
-            return float(ret), M1, D1, M2, D2, R, T
+            return float(ret), M1, D1, M2, D2, R, T, E, F
         except Exception:
-            return float('inf'), None, None, None, None, None, None
+            return float('inf'), None, None, None, None, None, None, None, None
+
+    def evaluate_stereo_metrics(
+        self,
+        selected_subset: List[Dict[str, Any]],
+    ) -> Tuple[float, float, float, Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
+        """
+        計算雙目標定指標：
+        1. 雙目外參 Jacobian 的條件數 (Condition Number)
+        2. 平均對稱極線誤差 (Mean Epipolar Error)
+        3. 標定 RMS 誤差
+
+        Returns
+        -------
+        Tuple[float, float, float, Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]
+            (cond_num, mean_epi_err, rms, R, T, F)
+        """
+        if len(selected_subset) < 3:
+            return float('inf'), float('inf'), float('inf'), None, None, None
+
+        try:
+            ret, M1, D1, M2, D2, R, T, E, F = self.perform_stereo_calibration(selected_subset)
+            if R is None or T is None or F is None:
+                return float('inf'), float('inf'), float('inf'), None, None, None
+
+            # 1. 計算極線誤差 (對稱極線幾何距離)
+            epi_errors = []
+            for p in selected_subset:
+                ptsL = p['left']['corners'].reshape(-1, 2)
+                ptsR = p['right']['corners'].reshape(-1, 2)
+
+                # 左點在右圖的極線 l_R = F * x_L
+                linesR = cv2.computeCorrespondEpilines(ptsL, 1, F).reshape(-1, 3)
+                for ptR, lR in zip(ptsR, linesR):
+                    dist_R = abs(lR[0] * ptR[0] + lR[1] * ptR[1] + lR[2]) / np.sqrt(lR[0]**2 + lR[1]**2)
+                    epi_errors.append(dist_R)
+
+                # 右點在左圖的極線 l_L = F^T * x_R
+                linesL = cv2.computeCorrespondEpilines(ptsR, 2, F).reshape(-1, 3)
+                for ptL, lL in zip(ptsL, linesL):
+                    dist_L = abs(lL[0] * ptL[0] + lL[1] * ptL[1] + lL[2]) / np.sqrt(lL[0]**2 + lL[1]**2)
+                    epi_errors.append(dist_L)
+
+            mean_epi_err = float(np.mean(epi_errors)) if epi_errors else float('inf')
+
+            # 2. 計算雙目外參 Jacobian 條件數
+            J_ext_list = []
+            rvec_stereo, _ = cv2.Rodrigues(R)
+
+            for p in selected_subset:
+                # 取得棋盤格在左相機下的姿態
+                ret_pnp, rvecL, tvecL = cv2.solvePnP(self.objp, p['left']['corners'], self.mtxL, self.distL)
+                if not ret_pnp:
+                    continue
+
+                # 棋盤格點在左相機座標系下的 3D 座標
+                R_mat_L, _ = cv2.Rodrigues(rvecL)
+                X_L = (R_mat_L @ self.objp.T + tvecL).T  # Shape: (N, 3)
+
+                # 投影到右相機，求相對於右相機外參 (R_stereo, T_stereo) 的 Jacobian
+                _, jac = cv2.projectPoints(X_L, rvec_stereo, T, self.mtxR, self.distR)
+                # jac 的前 6 欄是相對於 rvec_stereo (3 欄) 與 T (3 欄) 的偏導數
+                J_ext = jac[:, :6]
+                J_ext_list.append(J_ext)
+
+            if len(J_ext_list) == 0:
+                return float('inf'), mean_epi_err, ret, R, T, F
+
+            J_stack = np.vstack(J_ext_list)
+
+            # Column Normalization：消除物理單位差異（弧度 vs 米）
+            norms = np.linalg.norm(J_stack, axis=0)
+            norms[norms == 0] = 1.0
+            J_norm = J_stack / norms
+
+            # SVD 分解計算條件數
+            _, S, _ = np.linalg.svd(J_norm, full_matrices=False)
+            S_valid = S[S > 1e-5]
+
+            if len(S_valid) > 0:
+                cond_num = float(S_valid[0] / S_valid[-1])
+            else:
+                cond_num = float('inf')
+
+            return cond_num, mean_epi_err, ret, R, T, F
+
+        except Exception:
+            return float('inf'), float('inf'), float('inf'), None, None, None
 
     # ── 智能挑選主流程 ─────────────────────────────────────────────────────────
 
     def select_best_pairs(
         self,
         target_rmse: float = 0.5,
+        target_epi_err: float = 0.4,
         logger: Callable[[str], None] = print,
-    ) -> Tuple[List[Dict[str, Any]], float]:
+    ) -> Tuple[List[Dict[str, Any]], float, float, float]:
         """
         雙目智能挑選演算法：
             1. 5×5 空間網格優先填充
             2. 豐富 KMeans 多樣性補充
-            3. 帶 Simulated Annealing 的 RMS 疊代優化
+            3. 外參雅可比條件數最小化 + RMS與極線誤差限制之疊代優化
 
         Parameters
         ----------
         target_rmse : float
-            目標 RMS 閾值（像素），達到即提前停止。
+            目標 RMS 閾值（像素），預設 0.5。
+        target_epi_err : float
+            目標極線誤差閾值（像素），預設 0.4。
         logger : Callable
             日誌輸出函式。
 
         Returns
         -------
-        (selected_pairs, final_rms)
+        Tuple[List[Dict[str, Any]], float, float, float]
+            (selected_pairs, final_rms, final_cond, final_epi_err)
         """
         if len(self.paired_infos) < self.target_pairs:
             logger("可用配對不足，回傳全部。")
-            return self.paired_infos, 0.0
+            # 估算當前指標
+            cond, epi_err, rms, R, T, F = self.evaluate_stereo_metrics(self.paired_infos)
+            return self.paired_infos, rms, cond, epi_err
 
         logger(f"\n=== 開始智能挑選 (目標: {self.target_pairs} 對，網格: {_GRID_N}×{_GRID_N}) ===")
         candidates = sorted(self.paired_infos, key=lambda x: x['pair_score'], reverse=True)
@@ -405,78 +498,61 @@ class OptimizedStereoChessboardSelector:
                 selected.append(rem[0])
 
         selected = selected[:self.target_pairs]
-        rms, M1, D1, M2, D2, R, T = self.perform_stereo_calibration(selected)
-        logger(f"初始組合 RMS: {rms:.4f} px")
+        cond, epi_err, rms, R, T, F = self.evaluate_stereo_metrics(selected)
+        logger(f"初始組合 | 條件數 (Cond): {cond:.2f} | 極線誤差: {epi_err:.4f} px | RMS: {rms:.4f} px")
 
-        # ── Step 3：帶 SA 的疊代優化（優化 3、6）──────────────────────────────
-        temperature = _SA_INIT_TEMP
-        no_improve_count = 0
+        # ── Step 3：外參雅可比條件數最小化 + 誤差限制之疊代優化 ──────────────
+        current_cond = cond
+        current_epi_err = epi_err
+        current_rms = rms
 
-        for it in range(150):
-            if rms <= target_rmse:
-                break
-            if no_improve_count >= _MAX_NO_IMPROVE:
-                logger(f"連續 {_MAX_NO_IMPROVE} 次無改善，提前結束迭代。")
-                break
+        max_iter = 100
+        for it in range(1, max_iter + 1):
+            # 隨機選一個淘汰
+            swap_out_idx = np.random.randint(len(selected))
+            worst_p = selected[swap_out_idx]
 
-            # 評估各對影像誤差貢獻
-            errs: List[float] = []
-            for p in selected:
-                rL, rvL, tvL = cv2.solvePnP(self.objp, p['left']['corners'], M1, D1)
-                rR, rvR, tvR = cv2.solvePnP(self.objp, p['right']['corners'], M2, D2)
-                if rL and rR:
-                    pL, _ = cv2.projectPoints(self.objp, rvL, tvL, M1, D1)
-                    pR, _ = cv2.projectPoints(self.objp, rvR, tvR, M2, D2)
-                    err = (
-                        cv2.norm(p['left']['corners'], pL, cv2.NORM_L2)
-                        + cv2.norm(p['right']['corners'], pR, cv2.NORM_L2)
-                    ) / (2.0 * math.sqrt(len(pL)))
-                    errs.append(err)
-                else:
-                    errs.append(float('inf'))
-
-            worst_idx = int(np.argmax(errs))
-            worst_p = selected[worst_idx]
             pool = [x for x in candidates if x not in selected]
+            if not pool:
+                break
 
             # 優先同區域替換，維持空間覆蓋
-            repl_pool = (
-                [x for x in pool if x['pair_region'] == worst_p['pair_region']] or pool
-            )
-            if not repl_pool:
-                break
+            repl_pool = [x for x in pool if x['pair_region'] == worst_p['pair_region']] or pool
 
-            repl = max(repl_pool, key=lambda x: x['pair_score'])
+            # 使用穩定的 softmax 偏好高 score 的影像
+            scores = np.array([x['pair_score'] for x in repl_pool])
+            scores = scores - scores.max()  # 數值穩定化
+            weights = np.exp(scores)
+            weights = weights / weights.sum()
+
+            chosen_idx = np.random.choice(len(repl_pool), p=weights)
+            repl = repl_pool[chosen_idx]
+
             new_sel = selected.copy()
-            new_sel[worst_idx] = repl
-            n_rms, nM1, nD1, nM2, nD2, nR, nT = self.perform_stereo_calibration(new_sel)
+            new_sel[swap_out_idx] = repl
 
-            delta = n_rms - rms
-            # Simulated Annealing：接受較差解的機率（優化 6）
-            accept = (delta < 0) or (
-                temperature > 1e-6
-                and random.random() < math.exp(-delta / temperature)
-            )
+            new_cond, new_epi_err, new_rms, nR, nT, nF = self.evaluate_stereo_metrics(new_sel)
 
-            if accept:
-                action = "改善" if delta < 0 else "SA探索"
+            # 接受條件：
+            # 1. 條件數下降
+            # 2. RMS 需小於 target_rmse，或者如果當前 RMS 還沒降到 target_rmse 以下，則不應比 current_rms 差 (容忍 5% 波動)
+            # 3. 極線誤差需小於 target_epi_err，或者如果不符合，則不應比 current_epi_err 差 (容忍 5% 波動)
+            rms_ok = (new_rms < target_rmse) or (new_rms < max(target_rmse, current_rms * 1.05))
+            epi_ok = (new_epi_err < target_epi_err) or (new_epi_err < max(target_epi_err, current_epi_err * 1.05))
+
+            if new_cond < current_cond and rms_ok and epi_ok:
                 logger(
-                    f"Iter {it + 1:3d} [{action}] "
+                    f"Iter {it:3d}: 替換成功 | "
                     f"{worst_p['pair_key']} -> {repl['pair_key']} | "
-                    f"RMS: {n_rms:.4f} (Δ{delta:+.4f})"
+                    f"Cond: {current_cond:.2f} -> {new_cond:.2f} | "
+                    f"EpiErr: {new_epi_err:.4f} px | RMS: {new_rms:.4f} px"
                 )
-                selected, rms = new_sel, n_rms
-                M1, D1, M2, D2, R, T = nM1, nD1, nM2, nD2, nR, nT
-                if delta < 0:
-                    no_improve_count = 0
-                else:
-                    no_improve_count += 1
-            else:
-                no_improve_count += 1
+                selected = new_sel
+                current_cond = new_cond
+                current_epi_err = new_epi_err
+                current_rms = new_rms
 
-            temperature *= _SA_COOLING
-
-        logger(f"最終 RMS: {rms:.4f} px")
+        logger(f"最終組合 | 條件數: {current_cond:.2f} | 極線誤差: {current_epi_err:.4f} px | RMS: {current_rms:.4f} px")
 
         # 覆蓋度檢查
         final_regions = {p['pair_region'] for p in selected}
@@ -486,7 +562,7 @@ class OptimizedStereoChessboardSelector:
             f"（缺少: {sorted(missing)}）" if missing else "（全部覆蓋）"
         ))
 
-        return selected, rms
+        return selected, current_rms, current_cond, current_epi_err
 
     # ── 結果輸出 ───────────────────────────────────────────────────────────────
 
@@ -494,6 +570,8 @@ class OptimizedStereoChessboardSelector:
         self,
         selected_pairs: List[Dict[str, Any]],
         final_rms: float,
+        final_cond: float,
+        final_epi_err: float,
         out_left: str,
         out_right: str,
         logger: Callable[[str], None] = print,  # 優化 15：統一為參數傳遞，不再用 self.logger
@@ -536,7 +614,13 @@ class OptimizedStereoChessboardSelector:
         try:
             with open(report_path, 'w', encoding='utf-8') as f:
                 json.dump(
-                    {'total': len(selected_pairs), 'rms': round(final_rms, 4), 'details': summary},
+                    {
+                        'total': len(selected_pairs),
+                        'rms': round(final_rms, 4),
+                        'cond_num': round(final_cond, 2) if final_cond != float('inf') else 'inf',
+                        'epipolar_error': round(final_epi_err, 4) if final_epi_err != float('inf') else 'inf',
+                        'details': summary
+                    },
                     f, indent=2, ensure_ascii=False,
                 )
         except Exception as e:
@@ -544,7 +628,7 @@ class OptimizedStereoChessboardSelector:
 
         # 繪製分析圖
         try:
-            self.plot_analysis(selected_pairs, final_rms, report_dir, logger)
+            self.plot_analysis(selected_pairs, final_rms, final_cond, final_epi_err, report_dir, logger)
         except Exception as e:
             logger(f"分析圖繪製失敗: {e}")
 
@@ -552,6 +636,8 @@ class OptimizedStereoChessboardSelector:
         self,
         pairs: List[Dict[str, Any]],
         rms: float,
+        cond: float,
+        epi_err: float,
         out_dir: Path,
         logger: Callable[[str], None] = print,
     ) -> None:
@@ -573,7 +659,7 @@ class OptimizedStereoChessboardSelector:
         angles = [p['left']['angle'] for p in pairs]
         axes[1].hist(angles, bins=15, color='salmon', alpha=0.7, edgecolor='black')
         axes[1].axvline(0, color='gray', linestyle='--', linewidth=0.8)
-        axes[1].set_title(f'傾斜角度分佈 (RMS: {rms:.4f} px)')
+        axes[1].set_title(f'傾斜角度分佈 (Cond: {cond:.2f} | Epi: {epi_err:.3f} px)')
         axes[1].set_xlabel('角度 (度)')
         axes[1].set_ylabel('數量')
 
@@ -617,6 +703,6 @@ def run_stereo_pick(
     )
     if sel.analyze_and_pair(left_dir, right_dir, logger) == 0:
         return 0, 0.0
-    selected, rms = sel.select_best_pairs(target_rmse=0.3, logger=logger)
-    sel.save_results(selected, rms, out_left, out_right, logger)
+    selected, rms, cond, epi_err = sel.select_best_pairs(target_rmse=0.4, target_epi_err=0.4, logger=logger)
+    sel.save_results(selected, rms, cond, epi_err, out_left, out_right, logger)
     return len(selected), rms
