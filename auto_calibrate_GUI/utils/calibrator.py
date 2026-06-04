@@ -51,7 +51,7 @@ def calibration_final(
     try:
         ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(
             obj_points, img_points, img_shape, None, None,
-            criteria=criteria, flags=cv2.CALIB_FIX_K3
+            criteria=criteria, flags=0
         )
     except Exception as e:
         logger(f"[錯誤] 標定失敗: {e}"); return None
