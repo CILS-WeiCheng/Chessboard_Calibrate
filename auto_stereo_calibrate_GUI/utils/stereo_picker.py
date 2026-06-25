@@ -25,6 +25,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.cluster import KMeans
 
+# 使用 Agg 後端以確保在多執行緒中穩定繪圖，避免 GUI 線程警告
+plt.switch_backend('Agg')
+
 # ── 繪圖字型設定 ──────────────────────────────────────────────────────────────
 plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei', 'SimHei', 'Arial']
 plt.rcParams['axes.unicode_minus'] = False
@@ -310,9 +313,12 @@ class OptimizedStereoChessboardSelector:
         imgptsL = [p['left']['corners'] for p in selected_pairs]
         imgptsR = [p['right']['corners'] for p in selected_pairs]
 
-        # 優化 2：直接從快取的 image_shape 取得影像尺寸，不再重複讀檔
-        h, w = selected_pairs[0]['left']['image_shape']
-        img_size = (w, h)
+        # 優化 2：直接從快取的 image_shape 取得影像尺寸，並做左右一致性驗證
+        h_l, w_l = selected_pairs[0]['left']['image_shape']
+        h_r, w_r = selected_pairs[0]['right']['image_shape']
+        if (h_l, w_l) != (h_r, w_r):
+            raise ValueError(f"左右相機影像尺寸不一致！左：{w_l}x{h_l}，右：{w_r}x{h_r}")
+        img_size = (w_l, h_l)
 
         try:
             ret, M1, D1, M2, D2, R, T, E, F = cv2.stereoCalibrate(
@@ -519,9 +525,10 @@ class OptimizedStereoChessboardSelector:
             # 優先同區域替換，維持空間覆蓋
             repl_pool = [x for x in pool if x['pair_region'] == worst_p['pair_region']] or pool
 
-            # 使用穩定的 softmax 偏好高 score 的影像
+            # 使用帶有溫度參數 (T=0.2) 的 Softmax，增加對高分影像的選擇概率
+            temp = 0.2
             scores = np.array([x['pair_score'] for x in repl_pool])
-            scores = scores - scores.max()  # 數值穩定化
+            scores = (scores - scores.max()) / temp  # 數值穩定化
             weights = np.exp(scores)
             weights = weights / weights.sum()
 
@@ -538,7 +545,7 @@ class OptimizedStereoChessboardSelector:
             # 2. RMS 需小於 target_rmse，或者如果當前 RMS 還沒降到 target_rmse 以下，則不應比 current_rms 差 (容忍 5% 波動)
             # 3. 極線誤差需小於 target_epi_err，或者如果不符合，則不應比 current_epi_err 差 (容忍 5% 波動)
             rms_ok = (new_rms < target_rmse) or (new_rms < max(target_rmse, current_rms * 1.05))
-            epi_ok = (new_epi_err < target_epi_err) or (new_epi_err < max(target_epi_err, current_epi_err * 1.05))
+            epi_ok = (new_epi_err < current_epi_err) if new_epi_err > 0.5 else ((new_epi_err < target_epi_err) or (new_epi_err < max(target_epi_err, current_epi_err * 1.05)))
 
             if new_cond < current_cond and rms_ok and epi_ok:
                 logger(
