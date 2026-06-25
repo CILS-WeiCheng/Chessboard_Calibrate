@@ -168,8 +168,8 @@ class OptimizedSingleChessboardSelector:
             cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER,
             30, 0.001
         )
-        # 不鎖定 K3，讓演算法自由優化全部畸變係數
-        flags = 0
+        # 鎖定 K3 避免高階項過擬合與邊界扭曲，降低條件數
+        flags = cv2.CALIB_FIX_K3
 
         return cv2.calibrateCamera(
             objpoints, imgpoints, img_size, None, None,
@@ -199,17 +199,22 @@ class OptimizedSingleChessboardSelector:
 
     def evaluate_condition_number(self, selected_subset):
         """
-        計算標定雅可比矩陣的條件數 (Condition Number)。
-        條件數代表內參的穩定性/可觀測性：
-        - 條件數越小 → 這組照片對焦距的約束力越強
-        - 條件數越大 → 參數不穩定，容易因雜訊產生巨大偏差
+        計算標定雅可比矩陣的條件數 (Condition Number) 與凸包覆蓋率 (Convex Hull Coverage)。
+        條件數代表內參的穩定性/可觀測性。
         """
         if len(selected_subset) < 3:
-            return float('inf'), float('inf'), None, None
+            return float('inf'), float('inf'), 0.0, None, None
         try:
             ret, mtx, dist, rvecs, tvecs = self.perform_calibration(
                 selected_subset
             )
+
+            # 計算空間角點的凸包覆蓋率
+            all_pts = np.vstack([d['corners'].reshape(-1, 2) for d in selected_subset]).astype(np.float32)
+            hull = cv2.convexHull(all_pts)
+            hull_area = cv2.contourArea(hull)
+            img_w, img_h = selected_subset[0]['img_shape']
+            coverage_ratio = float(hull_area / (img_w * img_h))
 
             # 建立堆疊的雅可比矩陣
             J_int_list = []
@@ -241,10 +246,10 @@ class OptimizedSingleChessboardSelector:
             else:
                 cond_num = float('inf')
 
-            return cond_num, ret, mtx, dist
+            return cond_num, ret, coverage_ratio, mtx, dist
 
         except cv2.error:
-            return float('inf'), float('inf'), None, None
+            return float('inf'), float('inf'), 0.0, None, None
 
     # ─────────────────────────────────────────────────────────
     # 核心挑選演算法
@@ -254,12 +259,12 @@ class OptimizedSingleChessboardSelector:
         核心挑選演算法：
         1. 區域填充 → 確保空間分佈
         2. K-Means 多樣性抽樣 → 確保姿態多樣
-        3. 條件數 (Condition Number) 疊代優化 → 最大化幾何約束力
+        3. 條件數 (Condition Number) 疊代優化 → 最大化幾何約束力，並受限於角點包絡覆蓋率
         """
         if len(self.candidates) <= self.target_count:
             if not self.candidates:
                 return [], 0.0, float('inf'), None, None
-            cond, rms, mtx, dist = self.evaluate_condition_number(
+            cond, rms, cov, mtx, dist = self.evaluate_condition_number(
                 self.candidates
             )
             return self.candidates, rms, cond, mtx, dist
@@ -320,12 +325,12 @@ class OptimizedSingleChessboardSelector:
                 selected.append(rem[0])
 
         selected = selected[:self.target_count]
-        current_cond, current_rms, mtx, dist = (
+        current_cond, current_rms, current_cov, mtx, dist = (
             self.evaluate_condition_number(selected)
         )
         self.logger(
             f"初始組合 | 條件數: {current_cond:.2f} | "
-            f"RMS: {current_rms:.4f} px"
+            f"RMS: {current_rms:.4f} px | 凸包覆蓋率: {current_cov*100:.1f}%"
         )
 
         # 3. 疊代優化：以「最小化條件數」為目標進行隨機退火探索
@@ -339,9 +344,10 @@ class OptimizedSingleChessboardSelector:
             if not pool:
                 break
 
-            # 使用穩定的 softmax 偏好高 score 的影像
+            # 使用帶有溫度參數 (T=0.2) 的 Softmax，增加對高分影像的選擇概率
+            temp = 0.2
             scores = np.array([x['score'] for x in pool])
-            scores = scores - scores.max()  # 數值穩定：防止 exp 溢位
+            scores = (scores - scores.max()) / temp  # 數值穩定：防止 exp 溢位
             weights = np.exp(scores)
             weights = weights / weights.sum()
 
@@ -352,26 +358,31 @@ class OptimizedSingleChessboardSelector:
             new_selection = selected.copy()
             new_selection[swap_out_idx] = img_in
 
-            new_cond, new_rms, n_mtx, n_dist = (
+            new_cond, new_rms, new_cov, n_mtx, n_dist = (
                 self.evaluate_condition_number(new_selection)
             )
 
-            # 接受條件：條件數下降，且 RMS 依然在安全範圍內
-            if new_cond < current_cond and new_rms < target_rmse:
+            # 接受條件：
+            # 1. 條件數下降
+            # 2. RMS 依然在安全範圍內
+            # 3. 空間凸包覆蓋率不得出現嚴重退化 (不低於 65%，且不比當前差超過 2%)
+            cov_ok = (new_cov >= 0.65) or (new_cov >= current_cov * 0.98)
+            if new_cond < current_cond and new_rms < target_rmse and cov_ok:
                 self.logger(
-                    f"Iter {iter_count}: 替換成功 | "
+                    f"Iter {iter_count:3d}: 替換成功 | "
                     f"Cond: {current_cond:.2f} -> {new_cond:.2f} | "
-                    f"RMS: {new_rms:.4f}"
+                    f"RMS: {new_rms:.4f} px | 覆蓋率: {new_cov*100:.1f}%"
                 )
                 selected = new_selection
                 current_cond = new_cond
                 current_rms = new_rms
+                current_cov = new_cov
                 mtx = n_mtx
                 dist = n_dist
 
         self.logger(
             f"最終組合 | 條件數: {current_cond:.2f} | "
-            f"RMS: {current_rms:.4f} px"
+            f"RMS: {current_rms:.4f} px | 凸包覆蓋率: {current_cov*100:.1f}%"
         )
         return selected, current_rms, current_cond, mtx, dist
 
@@ -404,6 +415,13 @@ class OptimizedSingleChessboardSelector:
         """繪製分佈圖：區域、角度、評分"""
         fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
+        # 計算最終的凸包覆蓋率
+        all_pts = np.vstack([x['corners'].reshape(-1, 2) for x in images]).astype(np.float32)
+        hull = cv2.convexHull(all_pts)
+        hull_area = cv2.contourArea(hull)
+        img_w, img_h = images[0]['img_shape']
+        cov_ratio = float(hull_area / (img_w * img_h))
+
         counts = np.zeros(9)
         for r in [x['region'] for x in images]:
             counts[r] += 1
@@ -424,7 +442,7 @@ class OptimizedSingleChessboardSelector:
         axes[2].set_title('評分 vs 角度')
 
         plt.suptitle(
-            f'最終挑選分析 (Cond: {cond:.2f} | RMS: {rms:.4f} px)',
+            f'最終挑選分析 (Cond: {cond:.2f} | RMS: {rms:.4f} px | 覆蓋率: {cov_ratio*100:.1f}%)',
             fontsize=14
         )
         plt.tight_layout()
