@@ -168,8 +168,8 @@ class OptimizedSingleChessboardSelector:
             cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER,
             30, 0.001
         )
-        # 鎖定 K3 避免高階項過擬合與邊界扭曲，降低條件數
-        flags = cv2.CALIB_FIX_K3
+        # 鎖定 K3 並將切向畸變歸零，以防止過擬合與降低條件數
+        flags = cv2.CALIB_FIX_K3 | cv2.CALIB_ZERO_TANGENT_DIST
 
         return cv2.calibrateCamera(
             objpoints, imgpoints, img_size, None, None,
