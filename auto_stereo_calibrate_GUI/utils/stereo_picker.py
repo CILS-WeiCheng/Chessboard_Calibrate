@@ -114,6 +114,59 @@ class OptimizedStereoChessboardSelector:
         p2, _ = cv2.projectPoints(self.objp, rvec, tvec, mtx, dist)
         return float(cv2.norm(corners, p2, cv2.NORM_L2) / len(p2))
 
+    def align_corners(
+        self,
+        ptsL: np.ndarray,
+        ptsR: np.ndarray,
+        img_size: Tuple[int, int],
+    ) -> Tuple[np.ndarray, str, float]:
+        """
+        自動評估 4 種角點旋轉/翻轉可能性，並返回極線誤差最小的對齊後右相機角點。
+        """
+        cR_orig = ptsR.copy()
+        cR_rev = ptsR[::-1].copy()
+        cols, rows = self.chessboard_size
+        cR_h = ptsR.reshape(rows, cols, 2)[:, ::-1, :].reshape(-1, 1, 2)
+        cR_v = ptsR.reshape(rows, cols, 2)[::-1, :, :].reshape(-1, 1, 2)
+
+        cases = [
+            ("original", cR_orig),
+            ("reversed", cR_rev),
+            ("horizontal", cR_h),
+            ("vertical", cR_v)
+        ]
+
+        best_case = "original"
+        best_corners = cR_orig
+        min_epi_err = float('inf')
+
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 1e-4)
+        for name, corners_R in cases:
+            try:
+                ret, _, _, _, _, R, T, E, F = cv2.stereoCalibrate(
+                    [self.objp], [ptsL], [corners_R],
+                    self.mtxL, self.distL, self.mtxR, self.distR,
+                    img_size, criteria=criteria, flags=cv2.CALIB_FIX_INTRINSIC
+                )
+                ptsL_flat = ptsL.reshape(-1, 2)
+                ptsR_flat = corners_R.reshape(-1, 2)
+                linesR = cv2.computeCorrespondEpilines(ptsL_flat, 1, F).reshape(-1, 3)
+                errors = []
+                for ptR, lR in zip(ptsR_flat, linesR):
+                    d = abs(lR[0]*ptR[0] + lR[1]*ptR[1] + lR[2]) / np.sqrt(lR[0]**2 + lR[1]**2)
+                    errors.append(d)
+                mean_err = np.mean(errors)
+
+                if mean_err < min_epi_err:
+                    min_epi_err = mean_err
+                    best_case = name
+                    best_corners = corners_R
+            except Exception:
+                continue
+
+        return best_corners, best_case, min_epi_err
+
+
     def calculate_geometry_features(
         self,
         corners: np.ndarray,
@@ -276,27 +329,113 @@ class OptimizedStereoChessboardSelector:
                 side = 'left' if is_left else 'right'
                 raw[lf.name][side] = fut.result()
 
-        paired: List[Dict[str, Any]] = []
+        logger("正在掃描各影像對之對極幾何以進行對齊模式投票...")
+        candidates = []
         for lf, _ in tasks:
             entry = raw.get(lf.name, {})
             li, ri = entry.get('left'), entry.get('right')
             if li and ri and li['static_error'] < 10.0 and ri['static_error'] < 10.0:
-                # 優化 7：pair_score 改為加權平均並加入左右角度差懲罰
-                angle_diff = abs(li['angle'] - ri['angle'])
-                angle_diff_penalty = min(angle_diff / 90.0, 1.0) * 0.2
-                pair_score = (li['score'] + ri['score']) / 2.0 * (1.0 - angle_diff_penalty)
+                # 1. 幾何過濾：左右比例均衡度與最小尺度
+                scale_ratio = min(li['scale'], ri['scale']) / max(li['scale'], ri['scale'], 1e-5)
+                if scale_ratio < 0.35 or min(li['scale'], ri['scale']) < 0.05:
+                    continue
 
-                paired.append({
-                    'pair_key': lf.name,
-                    'left': li,
-                    'right': ri,
-                    'pair_score': float(pair_score),
-                    'pair_region': int(li['region']),
-                    'static_error_sum': float(li['static_error'] + ri['static_error']),
-                })
+                # 2. 評估 4 種翻轉情況的誤差
+                h, w = li['image_shape'][:2]
+                cols, rows = self.chessboard_size
+                cR = ri['corners']
+                
+                cR_orig = cR.copy()
+                cR_rev = cR[::-1].copy()
+                cR_h = cR.reshape(rows, cols, 2)[:, ::-1, :].reshape(-1, 1, 2)
+                cR_v = cR.reshape(rows, cols, 2)[::-1, :, :].reshape(-1, 1, 2)
+                
+                cases = {
+                    "original": cR_orig,
+                    "reversed": cR_rev,
+                    "horizontal": cR_h,
+                    "vertical": cR_v
+                }
+                
+                errors = {}
+                criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 1e-4)
+                for name, corners_R in cases.items():
+                    try:
+                        ret, _, _, _, _, R, T, E, F = cv2.stereoCalibrate(
+                            [self.objp], [li['corners']], [corners_R],
+                            self.mtxL, self.distL, self.mtxR, self.distR,
+                            (w, h), criteria=criteria, flags=cv2.CALIB_FIX_INTRINSIC
+                        )
+                        ptsL_flat = li['corners'].reshape(-1, 2)
+                        ptsR_flat = corners_R.reshape(-1, 2)
+                        linesR = cv2.computeCorrespondEpilines(ptsL_flat, 1, F).reshape(-1, 3)
+                        errs = []
+                        for ptR, lR in zip(ptsR_flat, linesR):
+                            d = abs(lR[0]*ptR[0] + lR[1]*ptR[1] + lR[2]) / np.sqrt(lR[0]**2 + lR[1]**2)
+                            errs.append(d)
+                        errors[name] = np.mean(errs)
+                    except Exception:
+                        errors[name] = 9999.0
+                
+                valid_errs = [v for v in errors.values() if v < 9000.0]
+                if len(valid_errs) >= 2:
+                    delta = max(valid_errs) - min(valid_errs)
+                    best_case = min(errors, key=errors.get)
+                    candidates.append({
+                        'lf_name': lf.name,
+                        'left_info': li,
+                        'right_info': ri,
+                        'delta': delta,
+                        'best_case': best_case,
+                        'cases': cases,
+                        'errors': errors
+                    })
+
+        if not candidates:
+            self.paired_infos = []
+            logger("[錯誤] 沒有找到任何有效的角點檢測配對！")
+            return 0
+
+        # 利用最具傾斜度（Delta 最大）的前 20 張影像進行多數決投票
+        candidates_sorted = sorted(candidates, key=lambda x: x['delta'], reverse=True)
+        vote_subset = candidates_sorted[:min(20, len(candidates_sorted))]
+        votes = defaultdict(int)
+        for c in vote_subset:
+            votes[c['best_case']] += 1
+        
+        session_align_mode = max(votes, key=votes.get)
+        logger(f"最具特徵傾斜度之前 {len(vote_subset)} 張影像投票結果：{dict(votes)}")
+        logger(f"➔ 決議本標定 session 唯一對齊模式為: 【{session_align_mode}】")
+
+        # 第二階段：強制將所有影像套用此唯一對齊模式，並排除該模式下極線誤差過大（如 > 15 px）的壞幀
+        paired: List[Dict[str, Any]] = []
+        for c in candidates:
+            li = c['left_info']
+            ri = c['right_info']
+            best_corners = c['cases'][session_align_mode]
+            epi_err = c['errors'][session_align_mode]
+            
+            if epi_err > 15.0:
+                continue
+                
+            ri['corners'] = best_corners
+            
+            # 優化 7：pair_score 改為加權平均並加入左右角度差懲罰
+            angle_diff = abs(li['angle'] - ri['angle'])
+            angle_diff_penalty = min(angle_diff / 90.0, 1.0) * 0.2
+            pair_score = (li['score'] + ri['score']) / 2.0 * (1.0 - angle_diff_penalty)
+
+            paired.append({
+                'pair_key': c['lf_name'],
+                'left': li,
+                'right': ri,
+                'pair_score': float(pair_score),
+                'pair_region': int(li['region']),
+                'static_error_sum': float(li['static_error'] + ri['static_error']),
+            })
 
         self.paired_infos = paired
-        logger(f"有效檢測配對數: {len(paired)}")
+        logger(f"有效檢測配對數 (經唯一對齊模式篩選與強限幅後): {len(paired)}")
         return len(paired)
 
     # ── 標定計算 ───────────────────────────────────────────────────────────────
