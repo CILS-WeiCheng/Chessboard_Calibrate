@@ -48,10 +48,12 @@ def calibration_final(
         logger("[錯誤] 在這些圖片中無法檢測到棋盤格")
         return None
 
+    flags = cv2.CALIB_FIX_K3 | cv2.CALIB_ZERO_TANGENT_DIST
+
     try:
         ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(
             obj_points, img_points, img_shape, None, None,
-            criteria=criteria, flags=0
+            criteria=criteria, flags=flags
         )
     except Exception as e:
         logger(f"[錯誤] 標定失敗: {e}"); return None
