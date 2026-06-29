@@ -4,6 +4,56 @@ import glob
 import os
 from pathlib import Path
 
+def align_corners(ptsL, ptsR, mtxL, distL, mtxR, distR, img_size, chessboard_size=(9, 6), square_size=0.091):
+    """
+    自動評估 4 種角點旋轉/翻轉可能性，並返回極線誤差最小的對齊後右相機角點。
+    """
+    cR_orig = ptsR.copy()
+    cR_rev = ptsR[::-1].copy()
+    cols, rows = chessboard_size
+    cR_h = ptsR.reshape(rows, cols, 2)[:, ::-1, :].reshape(-1, 1, 2)
+    cR_v = ptsR.reshape(rows, cols, 2)[::-1, :, :].reshape(-1, 1, 2)
+
+    cases = [
+        ("original", cR_orig),
+        ("reversed", cR_rev),
+        ("horizontal", cR_h),
+        ("vertical", cR_v)
+    ]
+
+    objp = np.zeros((chessboard_size[0] * chessboard_size[1], 3), np.float32)
+    objp[:, :2] = np.mgrid[0:chessboard_size[0], 0:chessboard_size[1]].T.reshape(-1, 2) * square_size
+
+    best_case = "original"
+    best_corners = cR_orig
+    min_epi_err = float('inf')
+
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 1e-4)
+    for name, corners_R in cases:
+        try:
+            ret, _, _, _, _, R, T, E, F = cv2.stereoCalibrate(
+                [objp], [ptsL], [corners_R],
+                mtxL, distL, mtxR, distR,
+                img_size, criteria=criteria, flags=cv2.CALIB_FIX_INTRINSIC
+            )
+            ptsL_flat = ptsL.reshape(-1, 2)
+            ptsR_flat = corners_R.reshape(-1, 2)
+            linesR = cv2.computeCorrespondEpilines(ptsL_flat, 1, F).reshape(-1, 3)
+            errors = []
+            for ptR, lR in zip(ptsR_flat, linesR):
+                d = abs(lR[0]*ptR[0] + lR[1]*ptR[1] + lR[2]) / np.sqrt(lR[0]**2 + lR[1]**2)
+                errors.append(d)
+            mean_err = np.mean(errors)
+
+            if mean_err < min_epi_err:
+                min_epi_err = mean_err
+                best_case = name
+                best_corners = corners_R
+        except Exception:
+            continue
+
+    return best_corners, best_case, min_epi_err
+
 def stereo_calibration(
     left_images_dir,
     right_images_dir,
@@ -28,7 +78,8 @@ def stereo_calibration(
         l_imgs.extend(glob.glob(os.path.join(left_images_dir, ext)))
     l_imgs = sorted(l_imgs)
     
-    obj_pts, img_ptsL, img_ptsR = [], [], []
+    from collections import defaultdict
+    candidates = []
     img_size = None
     
     for fl in l_imgs:
@@ -47,9 +98,78 @@ def stereo_calibration(
         retL, cL = cv2.findChessboardCorners(grayL, chessboard_size, None)
         retR, cR = cv2.findChessboardCorners(grayR, chessboard_size, None)
         if retL and retR:
-            obj_pts.append(objp)
-            img_ptsL.append(cv2.cornerSubPix(grayL, cL, (11, 11), (-1, -1), criteria))
-            img_ptsR.append(cv2.cornerSubPix(grayR, cR, (11, 11), (-1, -1), criteria))
+            refL = cv2.cornerSubPix(grayL, cL, (11, 11), (-1, -1), criteria)
+            refR = cv2.cornerSubPix(grayR, cR, (11, 11), (-1, -1), criteria)
+            
+            cR_orig = refR.copy()
+            cR_rev = refR[::-1].copy()
+            cols, rows = chessboard_size
+            cR_h = refR.reshape(rows, cols, 2)[:, ::-1, :].reshape(-1, 1, 2)
+            cR_v = refR.reshape(rows, cols, 2)[::-1, :, :].reshape(-1, 1, 2)
+            
+            cases = {
+                "original": cR_orig,
+                "reversed": cR_rev,
+                "horizontal": cR_h,
+                "vertical": cR_v
+            }
+            
+            errors = {}
+            for name, corners_R in cases.items():
+                try:
+                    ret, _, _, _, _, R, T, E, F = cv2.stereoCalibrate(
+                        [objp], [refL], [corners_R],
+                        mtxL, distL, mtxR, distR,
+                        img_size, criteria=criteria, flags=cv2.CALIB_FIX_INTRINSIC
+                    )
+                    ptsL_flat = refL.reshape(-1, 2)
+                    ptsR_flat = corners_R.reshape(-1, 2)
+                    linesR = cv2.computeCorrespondEpilines(ptsL_flat, 1, F).reshape(-1, 3)
+                    errs = []
+                    for ptR, lR in zip(ptsR_flat, linesR):
+                        d = abs(lR[0]*ptR[0] + lR[1]*ptR[1] + lR[2]) / np.sqrt(lR[0]**2 + lR[1]**2)
+                        errs.append(d)
+                    errors[name] = np.mean(errs)
+                except Exception:
+                    errors[name] = 9999.0
+                    
+            valid_errs = [v for v in errors.values() if v < 9000.0]
+            if len(valid_errs) >= 2:
+                delta = max(valid_errs) - min(valid_errs)
+                best_case = min(errors, key=errors.get)
+                candidates.append({
+                    'refL': refL,
+                    'cases': cases,
+                    'delta': delta,
+                    'best_case': best_case,
+                    'errors': errors
+                })
+
+    if not candidates:
+        logger("[錯誤] 無法在任何圖片對中檢測到成對棋盤格"); return None
+
+    # 進行多數決投票
+    candidates_sorted = sorted(candidates, key=lambda x: x['delta'], reverse=True)
+    vote_subset = candidates_sorted[:min(20, len(candidates_sorted))]
+    votes = defaultdict(int)
+    for c in vote_subset:
+        votes[c['best_case']] += 1
+    
+    session_align_mode = max(votes, key=votes.get)
+    logger(f"最終標定階段投票結果（最具傾斜度前 {len(vote_subset)} 張）：{dict(votes)}")
+    logger(f"➔ 決議最終標定角點對齊模式為: 【{session_align_mode}】")
+
+    # 第二階段：收集套用此對齊模式後的角點點集
+    obj_pts, img_ptsL, img_ptsR = [], [], []
+    for c in candidates:
+        epi_err = c['errors'][session_align_mode]
+        # 排除偏離該模式大於 15.0 px 的嚴重噪訊對
+        if epi_err > 15.0:
+            continue
+            
+        obj_pts.append(objp)
+        img_ptsL.append(c['refL'])
+        img_ptsR.append(c['cases'][session_align_mode])
 
     if not obj_pts:
         logger("[錯誤] 無法在圖片中檢測到棋盤格"); return None
